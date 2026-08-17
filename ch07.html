@@ -119,7 +119,7 @@
   </div>
 </div>
 
-<p>代入现场：网关、订单、支付编排共 3 层，每层最多尝试 3 次，末端最坏放大为 <strong>3 × 3 × 3 = 27 倍</strong>。入口 2,000 QPS 便可能变成 54,000 次/秒渠道调用；一次局部变慢，被自己的“可靠性策略”放大成全链路过载。</p>
+<p>代入现场：网关、订单、支付编排共 3 层，每层最多尝试 3 次，末端最坏放大为 <strong>3 × 3 × 3 = 27 倍</strong>。入口 2,000 QPS 便可能变成 54,000 次/秒渠道调用；一次局部变慢，被自己的“可靠性策略”放大成全链路过载。说“重试 3 次”时先问清楚是 3 次还是 4 次——工程惯例里“重试 3 次”常指首次 + 3 次重试 = 4 次尝试，三层最坏是 4³=64，不是 27；差一层就是 27 与 64 的区别。</p>
 
 <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
   <div class="metric">
@@ -314,7 +314,7 @@
 </div><!-- /wrap -->
 <div class="wide" style="padding:0 22px">
 <h2><span class="sec">07 · 4 模拟器</span>好心如何乘成一场风暴</h2>
-<p style="max-width:760px">把入口请求沿调用链逐层展开：重试次数在末端相乘，backoff 与 jitter 只重排请求到达时间，不会凭空消掉请求。</p>
+<p style="max-width:760px">把入口请求沿调用链逐层展开：尝试次数在末端相乘，backoff 与 jitter 只重排请求到达时间，不会凭空消掉请求。</p>
 
 <div class="sim" id="sim">
   <div class="sim-head">
@@ -358,6 +358,18 @@
     <li><strong>摊开尖峰。</strong>保持 3 层 × 3 次，先关闭 backoff 注入，再重置、开启 backoff 注入 → 累计请求数变化不到 10%，但峰值下降超过 40%。<strong>backoff 治瞬时峰，不治总量。</strong></li>
     <li><strong>打散同步。</strong>保持 backoff 开启，再打开 jitter 并重置注入 → 峰值严格低于只开 backoff 时。<strong>±50% 扰动打散同刻重发，是惊群效应的解药。</strong></li>
   </ol>
+
+  <h3>⚖️ 这个模型简化了什么</h3>
+  <ul>
+    <li><strong>模型用小数 <code>weight</code> 表示期望请求量，不是逐个离散请求。</strong>波形图上的数值是一条连续期望曲线 → 真实系统里请求是离散事件，会有到达相关性和批次效应 → <strong>因此不要把图上的整数刻度当成某一毫秒的真实并发请求数，它演示的是放大倍数的形状，不是精确计数。</strong></li>
+    <li><strong>固定失败率、各层相互独立，且没有 deadline、取消、熔断或下游过载反馈。</strong>模型里下游故障率是常量，不会因为请求变多而进一步恶化 → 真实系统里下游过载会反馈回上游（排队变长、响应更慢），失败率不是常数，业务层的 deadline 也会主动砍掉超时请求 → <strong>因此不要得出「重试风暴只能靠 backoff/jitter 缓解」的结论，deadline、熔断和预算才是真正止损的机制。</strong></li>
+    <li><strong>backoff 在模型里必然只改波形、不改总量，因为全部请求在实验开始前就已按固定规则生成完毕。</strong>这是模型的实现方式，不是重试系统的物理规律 → 真实系统里 deadline 到期会让后续重试根本不会发出，从而真的减少总尝试数 → <strong>因此不要把「backoff 本身不减少总请求量」当成放之四海皆准的结论——那是这个模型没有实现取消/预算的结果，生产上取消和预算是能真正砍掉尝试的。</strong></li>
+  </ul>
+  <p style="font-size:14.5px;color:var(--muted);margin-top:10px">
+    这些简化是<strong>故意的</strong>：模拟器的目的是隔离一个因果关系，不是预测生产数值。
+    实验清单里的每条现象都由 <code>tools/simN-*-model-test.js</code> 的断言保证，
+    但保证的是<em>这个模型</em>里的现象。
+  </p>
 </div>
 </div><!-- /wide -->
 <div class="wrap">
@@ -428,7 +440,7 @@
 <div class="lesson">
   <div class="li">
     <span class="num">壹</span>
-    <div><strong>重试次数要按链路算。</strong>某个服务“只试三次”听起来克制，三层叠起来却是 27 倍；评审必须画到末端。</div>
+    <div><strong>尝试次数要按链路算。</strong>某个服务“只试三次”听起来克制，三层叠起来却是 27 倍；评审必须画到末端。</div>
   </div>
   <div class="li">
     <span class="num">貳</span>

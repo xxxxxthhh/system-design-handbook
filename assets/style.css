@@ -175,7 +175,7 @@ footer{border-top:1px solid var(--line);margin-top:80px}
 /* ---------- 引用式病历卡（无新增卡的章节用，指向已定义的卡） ---------- */
 .case-ref{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--faint);
   border-radius:10px;padding:13px 18px;margin:16px 0;font-size:15px;line-height:1.8}
-.case-ref .no{font-family:var(--mono);font-size:12.5px;color:var(--faint);letter-spacing:.08em;margin-right:10px}
+.case-ref .no{font-family:var(--mono);font-size:12.5px;color:var(--muted);letter-spacing:.08em;margin-right:10px}
 .case-ref .nm{font-weight:650;color:#F0F4FF;margin-right:10px}
 .case-ref .sym{color:var(--amber);font-family:var(--mono);font-size:13.5px;margin-right:10px}
 .case-ref a{color:var(--teal);text-decoration:none;border-bottom:1px solid rgba(63,210,199,.35)}
@@ -188,7 +188,7 @@ footer{border-top:1px solid var(--line);margin-top:80px}
 .arch-flow{display:flex;align-items:stretch;gap:0;min-width:min-content}
 .arch-node{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:112px;text-align:center;flex:none}
 .arch-node .nn{font-size:14.5px;font-weight:650;color:#F0F4FF}
-.arch-node .nd{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.6}
+.arch-node .nd{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.6}
 .arch-node.db{border-color:#3B4A6B}
 .arch-node.new{border-color:var(--teal)}
 .arch-node.new .nn{color:#9FE8DE}
@@ -210,7 +210,7 @@ footer{border-top:1px solid var(--line);margin-top:80px}
 .beat .bt{font-family:var(--mono);font-size:13.5px;color:var(--red);font-weight:700;letter-spacing:.05em}
 .beat .b.safe .bt{color:var(--teal)}
 .beat .b p{margin:5px 0 0;font-size:16px}
-.srcref{font-family:var(--mono);font-size:12px;color:var(--faint);letter-spacing:.03em}
+.srcref{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.03em}
 .srcref a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line)}
 .srcref a:hover{color:var(--teal);border-bottom-color:var(--teal)}
 .sources{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;margin:30px 0;font-size:14.5px}
@@ -227,11 +227,11 @@ footer{border-top:1px solid var(--line);margin-top:80px}
 .grp-d{font-size:14.5px;color:var(--muted);margin:10px 0 4px}
 .tbl-wrap{overflow-x:auto;margin:26px 0;border:1px solid var(--line);border-radius:12px}
 table.tbl{border-collapse:collapse;width:100%;min-width:640px;font-size:14.5px;background:var(--panel)}
-table.tbl th{font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--faint);text-align:left;
+table.tbl th{font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--muted);text-align:left;
   padding:12px 14px;border-bottom:1px solid var(--line);background:var(--panel-2);font-weight:600;white-space:nowrap}
 table.tbl td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.75}
 table.tbl tr:last-child td{border-bottom:0}
-table.tbl td.ch{font-family:var(--mono);font-size:12.5px;color:var(--faint);white-space:nowrap}
+table.tbl td.ch{font-family:var(--mono);font-size:12.5px;color:var(--muted);white-space:nowrap}
 /* 首列是标签列：其余列文字长会抢走宽度，把它挤成每行两三个字。给它一个下限。 */
 table.tbl th:first-child,table.tbl td:first-child{min-width:118px}
 table.tbl a{color:var(--teal);text-decoration:none;border-bottom:1px solid rgba(63,210,199,.3)}
@@ -247,12 +247,12 @@ table.tbl td b{color:#AFC6FF}
 .toc-item>*{min-width:0}
 .toc-item:hover{background:var(--panel-2)}
 .toc-item:focus-visible{outline:2px solid var(--teal);outline-offset:-2px;border-radius:6px}
-.toc-num{font-family:var(--mono);font-size:13px;color:var(--faint);padding-top:3px;letter-spacing:.06em}
+.toc-num{font-family:var(--mono);font-size:13px;color:var(--muted);padding-top:3px;letter-spacing:.06em}
 .toc-t{font-size:17px;font-weight:650;color:#F0F4FF;line-height:1.55}
 .toc-d{font-size:14.5px;color:var(--muted);margin-top:4px;line-height:1.7}
 .toc-tags{margin-top:7px;display:flex;gap:7px;flex-wrap:wrap;align-items:flex-start}
 .tag-pill{font-family:var(--mono);font-size:11px;letter-spacing:.05em;padding:2px 8px;border-radius:99px;
-  border:1px solid var(--line);color:var(--faint);white-space:nowrap;flex:none;line-height:1.7}
+  border:1px solid var(--line);color:var(--muted);white-space:nowrap;flex:none;line-height:1.7}
 .tag-pill.sim{border-color:#2E6B62;color:#9FE8DE}
 .tag-pill.card{border-color:#6B5A2E;color:var(--amber)}
 .toc-item.level{border-left:3px solid var(--red);padding-left:14px;grid-template-columns:44px 1fr}
@@ -263,3 +263,22 @@ table.tbl td b{color:#AFC6FF}
 .howto .h .ht{font-size:15.5px;font-weight:650;color:#F0F4FF}
 .howto .h .hd{font-size:14px;color:var(--muted);margin-top:6px;line-height:1.75}
 .howto .h .hn{font-family:var(--mono);font-size:11.5px;color:var(--amber);letter-spacing:.1em}
+
+/* ---------- A2：--faint 对比度不达 WCAG AA（3.0–3.3:1 < 正文要求的 4.5:1），改用已达标的 --muted（5.8–6.3:1）
+   以下选择器定义在 BASE 段（样章逐字抽取，禁止直接修改），在此追加覆盖规则把文字色从 --faint 换成 --muted。
+   覆盖：.book-bar（书眉）、h2 .sec（章节序号标签）、.pager-body .g（值班现场终端摘要文本）、.metric .k（指标标签）、
+   .opt .tag（决策/自测选项字母）、.case-no（病历卡编号）、.case-alias（病历卡别名）、.case-row .lbl（病历卡五行标签）、
+   .sim-metric .k（模拟器指标标签）、.sim-log .tt（模拟器日志时间戳）、.foot-in（页脚链接行）——均为读者需要
+   实际阅读的正文性质小字。未覆盖 .book-bar a[aria-disabled="true"]（禁用态链接，WCAG 对非激活控件无对比度要求）、
+   .case-ref 的 border-left、.arch-arrow 的箭头符号（纯装饰/图形，不是文本）。 */
+.book-bar{color:var(--muted)}
+h2 .sec{color:var(--muted)}
+.pager-body .g{color:var(--muted)}
+.metric .k{color:var(--muted)}
+.opt .tag{color:var(--muted)}
+.case-no{color:var(--muted)}
+.case-alias{color:var(--muted)}
+.case-row .lbl{color:var(--muted)}
+.sim-metric .k{color:var(--muted)}
+.sim-log .tt{color:var(--muted)}
+.foot-in{color:var(--muted)}

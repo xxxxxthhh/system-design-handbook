@@ -5,18 +5,39 @@
 var cv=document.getElementById('chart');
 if(!cv)return;
 var ctx=cv.getContext('2d');
-var W=cv.width,H=cv.height;
+var W,H;
+function resizeCanvas(redraw){
+  var rect=cv.getBoundingClientRect();
+  if(!rect.width||!rect.height)return;
+  var dpr=window.devicePixelRatio||1;
+  W=rect.width;H=rect.height;
+  cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  if(redraw&&S){
+    try{draw();}catch(e){}
+  }
+}
+resizeCanvas();
+var resizeTimer=null;
+function scheduleResize(){
+  if(document.hidden||resizeTimer)return;
+  resizeTimer=setTimeout(function(){
+    resizeTimer=null;
+    if(!document.hidden)resizeCanvas(true);
+  },150);
+}
+window.addEventListener('resize',scheduleResize);
 var WINDOW=20;
 
 var DT=0.1;
-var DEF={layers:3,retries:3,backoff:false,jitter:false,failureRate:1};
+var DEF={layers:3,attempts:3,backoff:false,jitter:false,failureRate:1};
 var S;
 function makeState(overrides){
   return Object.assign({t:0,running:true,events:[],injected:0,delivered:0,hist:[]},DEF,overrides||{});
 }
 function expectedAmplification(S){
   var perLayer=0;
-  for(var i=0;i<S.retries;i++)perLayer+=Math.pow(S.failureRate,i);
+  for(var i=0;i<S.attempts;i++)perLayer+=Math.pow(S.failureRate,i);
   return Math.pow(perLayer,S.layers);
 }
 function jitterFactor(comboIndex,layer){
@@ -25,12 +46,12 @@ function jitterFactor(comboIndex,layer){
   return 0.5+(x%10001)/10000;
 }
 function injectFailure(S){
-  var total=Math.pow(S.retries,S.layers);
+  var total=Math.pow(S.attempts,S.layers);
   for(var combo=0;combo<total;combo++){
     var n=combo,delay=0,weight=1;
     for(var layer=0;layer<S.layers;layer++){
-      var attempt=n%S.retries;
-      n=Math.floor(n/S.retries);
+      var attempt=n%S.attempts;
+      n=Math.floor(n/S.attempts);
       weight*=Math.pow(S.failureRate,attempt);
       if(S.backoff&&attempt>0){
         var part=(Math.pow(2,attempt)-1)*0.4;
@@ -59,7 +80,7 @@ function modelTick(S){
 function reset(){
   S=makeState();
   document.getElementById('sl-layers').value=DEF.layers;
-  document.getElementById('sl-retries').value=DEF.retries;
+  document.getElementById('sl-retries').value=DEF.attempts;
   document.getElementById('sl-failure').value=DEF.failureRate*100;
   document.getElementById('tg-backoff').checked=DEF.backoff;
   document.getElementById('tg-jitter').checked=DEF.jitter;
@@ -115,11 +136,11 @@ function draw(){
 }
 function syncLabels(){
   document.getElementById('lb-layers').textContent=S.layers+' 层';
-  document.getElementById('lb-retries').textContent=S.retries+' 次';
+  document.getElementById('lb-retries').textContent=S.attempts+' 次';
   document.getElementById('lb-failure').textContent=Math.round(S.failureRate*100)+'%';
 }
 document.getElementById('sl-layers').addEventListener('input',function(e){S.layers=Number(e.target.value);syncLabels();});
-document.getElementById('sl-retries').addEventListener('input',function(e){S.retries=Number(e.target.value);syncLabels();});
+document.getElementById('sl-retries').addEventListener('input',function(e){S.attempts=Number(e.target.value);syncLabels();});
 document.getElementById('sl-failure').addEventListener('input',function(e){S.failureRate=Number(e.target.value)/100;syncLabels();});
 document.getElementById('tg-backoff').addEventListener('change',function(e){
   S.backoff=e.target.checked;logLine(S.backoff?'✅ backoff 开启：重试按指数间隔错开。':'⚠️ backoff 关闭：重试恢复同刻发出。');

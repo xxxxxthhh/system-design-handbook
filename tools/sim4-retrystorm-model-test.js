@@ -4,13 +4,13 @@
 "use strict";
 
 const DT=0.1;
-const DEF={layers:3,retries:3,backoff:false,jitter:false,failureRate:1};
+const DEF={layers:3,attempts:3,backoff:false,jitter:false,failureRate:1};
 function makeState(overrides={}){
   return Object.assign({t:0,running:true,events:[],injected:0,delivered:0},DEF,overrides);
 }
 function expectedAmplification(S){
   let perLayer=0;
-  for(let i=0;i<S.retries;i++) perLayer+=Math.pow(S.failureRate,i);
+  for(let i=0;i<S.attempts;i++) perLayer+=Math.pow(S.failureRate,i);
   return Math.pow(perLayer,S.layers);
 }
 function jitterFactor(comboIndex,layer){
@@ -19,12 +19,12 @@ function jitterFactor(comboIndex,layer){
   return 0.5+(x%10001)/10000;
 }
 function injectFailure(S){
-  const total=Math.pow(S.retries,S.layers);
+  const total=Math.pow(S.attempts,S.layers);
   for(let combo=0;combo<total;combo++){
     let n=combo,delay=0,weight=1;
     for(let layer=0;layer<S.layers;layer++){
-      const attempt=n%S.retries;
-      n=Math.floor(n/S.retries);
+      const attempt=n%S.attempts;
+      n=Math.floor(n/S.attempts);
       weight*=Math.pow(S.failureRate,attempt);
       if(S.backoff&&attempt>0){
         let part=(Math.pow(2,attempt)-1)*0.4;
@@ -57,30 +57,30 @@ function runWave(overrides,ticks=200){
   return {S,r,qps,total:S.delivered,peak:Math.max(...qps)};
 }
 
-assert("默认参数固定为 3 层 / 每层 3 次 / backoff 关 / jitter 关 / 故障率 100%",
-  DEF.layers===3&&DEF.retries===3&&!DEF.backoff&&!DEF.jitter&&DEF.failureRate===1);
+assert("默认参数固定为 3 层 / 每层 3 次尝试 / backoff 关 / jitter 关 / 故障率 100%",
+  DEF.layers===3&&DEF.attempts===3&&!DEF.backoff&&!DEF.jitter&&DEF.failureRate===1);
 
 /* 实验① 重试放大是各层尝试次数的乘积。 */
-const amp1=expectedAmplification(makeState({layers:1,retries:3}));
-const amp2=expectedAmplification(makeState({layers:2,retries:3}));
-const amp3=expectedAmplification(makeState({layers:3,retries:3}));
-assert("实验①a 1 层 × 3 次的放大倍数 ≈ 3（误差 <5%）",Math.abs(amp1-3)/3<0.05);
-assert("实验①b 2 层 × 3 次的放大倍数 ≈ 9（误差 <5%）",Math.abs(amp2-9)/9<0.05);
-assert("实验①c 3 层 × 3 次的放大倍数 ≈ 27（误差 <5%）",Math.abs(amp3-27)/27<0.05);
-assert("实验①d 层数 1 且每层 1 次时放大倍数 = 1",expectedAmplification(makeState({layers:1,retries:1}))===1);
+const amp1=expectedAmplification(makeState({layers:1,attempts:3}));
+const amp2=expectedAmplification(makeState({layers:2,attempts:3}));
+const amp3=expectedAmplification(makeState({layers:3,attempts:3}));
+assert("实验①a 1 层 × 3 次尝试的放大倍数 ≈ 3（误差 <5%）",Math.abs(amp1-3)/3<0.05);
+assert("实验①b 2 层 × 3 次尝试的放大倍数 ≈ 9（误差 <5%）",Math.abs(amp2-9)/9<0.05);
+assert("实验①c 3 层 × 3 次尝试的放大倍数 ≈ 27（误差 <5%）",Math.abs(amp3-27)/27<0.05);
+assert("实验①d 层数 1 且每层 1 次尝试时放大倍数 = 1",expectedAmplification(makeState({layers:1,attempts:1}))===1);
 
 /* 实验② backoff 改波形，不改总量。 */
-const noBackoff=runWave({layers:3,retries:3,backoff:false,jitter:false});
-const backoff=runWave({layers:3,retries:3,backoff:true,jitter:false});
+const noBackoff=runWave({layers:3,attempts:3,backoff:false,jitter:false});
+const backoff=runWave({layers:3,attempts:3,backoff:true,jitter:false});
 assert("实验②a backoff 前后累计请求数变化 <10%",Math.abs(backoff.total-noBackoff.total)/noBackoff.total<0.10);
 assert("实验②b backoff 使峰值下降 >40%",backoff.peak<noBackoff.peak*0.60);
 
 /* 实验③ jitter 打散同刻重发。 */
-const jittered=runWave({layers:3,retries:3,backoff:true,jitter:true});
+const jittered=runWave({layers:3,attempts:3,backoff:true,jitter:true});
 assert("实验③ jitter 使峰值再次严格下降",jittered.peak<backoff.peak);
 
 /* 极端参数、连点注入与长时间运行。 */
-const extreme=makeState({layers:4,retries:4,backoff:true,jitter:true,failureRate:1});
+const extreme=makeState({layers:4,attempts:4,backoff:true,jitter:true,failureRate:1});
 let finite=true;
 for(let i=0;i<2000;i++){
   if(i%100===0) injectFailure(extreme);

@@ -58,7 +58,7 @@
   <div class="metric">
     <div class="k">容量水位</div>
     <div class="v">0.67</div>
-    <div class="d down">● 低于红线 0.7</div>
+    <div class="d down">● 低于起步值 0.7</div>
   </div>
   <div class="metric">
     <div class="k">实验爆炸半径</div>
@@ -115,11 +115,13 @@
 
 <div class="pager" style="border-color:var(--line)">
   <div class="pager-body" style="font-size:15px;text-align:center">
-容量水位 = 预估峰值流量 ÷ 已压测验证容量　　（红线 0.7）
+容量水位 = 预估峰值流量 ÷ 已压测验证容量　　（起步值 0.7）
   </div>
 </div>
 
-<p>代入下一次大促：预估峰值 120 万 QPS，已压测验证容量 180 万 QPS，水位是 <strong>120 ÷ 180 ≈ 0.67</strong>，低于 0.7 红线。余下约 33% 不是闲置，它要吸收预测误差、长尾、单元故障与实验扰动。</p>
+<p>代入下一次大促：预估峰值 120 万 QPS，已压测验证容量 180 万 QPS，水位是 <strong>120 ÷ 180 ≈ 0.67</strong>，低于 0.7 起步值。余下约 33% 不是闲置，它要吸收预测误差、长尾、单元故障与实验扰动。</p>
+
+<p>0.7 不是行业红线，只是「秒抢」按本次条件推出的<strong>起步值</strong>——同一个数字放到别的系统身上未必安全，也未必需要留这么多余量。它至少取决于七件事：<strong>流量预估误差</strong>越大，水位目标要压得越低；<strong>冗余模型</strong>是 N+1 还是 N+2，决定同样峰值下还能不能把日常水位设得更高；<strong>故障域大小</strong>越大，一次故障吃掉的验证容量比例越高，水位目标要相应下调；<strong>扩容时延</strong>越短，越敢把水位推向上限；<strong>服务时间方差</strong>越重尾，越容易在峰值附近排队；<strong>降级能力</strong>越强，能优雅丢非核心流量的系统水位上限越高；<strong>恢复期追平负载</strong>越大，故障恢复后短时叠加到正常峰值上的积压请求越多。这七项没有一项是「秒抢」独有的行业常数，每次大促前都要重新核算。</p>
 
 <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
   <div class="metric">
@@ -138,7 +140,7 @@
     <div class="d">120 ÷ 135</div>
   </div>
   <div class="metric">
-    <div class="k">红线</div>
+    <div class="k">起步值</div>
     <div class="v" style="color:var(--amber)">0.70</div>
     <div class="d">超过即补容量或减流</div>
   </div>
@@ -421,11 +423,11 @@
   <p class="stem">预估峰值 84 万 QPS，已压测验证容量 120 万 QPS。容量水位是多少，处于什么位置？</p>
   <div class="q-opts">
     <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>0.30，余量很大</button>
-    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>0.70，正好到红线</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>0.70，正好到起步值</button>
     <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>1.43，超过容量</button>
     <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>36 万，不是比例</button>
   </div>
-  <div class="verdict" id="v-q2"><p><b class="good">B。</b><code>84 ÷ 120 = 0.70</code>，已经触及红线。C 是最诱人的错误项，它把分子分母颠倒成 <code>120/84</code>；容量水位比较的是需求占验证容量的比例。</p></div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b><code>84 ÷ 120 = 0.70</code>，已经到起步值，是否需要继续观察还要看误差、冗余与故障域这些具体条件。C 是最诱人的错误项，它把分子分母颠倒成 <code>120/84</code>；容量水位比较的是需求占验证容量的比例。</p></div>
 </div>
 
 <div class="quiz" id="q3">
@@ -465,7 +467,7 @@
   </div>
   <div class="iq">
     <b>「容量规划怎么做？」</b>
-    <span class="ans">答题骨架：业务峰值与形状 → 压测验证容量 → 水位红线 0.7 → 按故障场景重算分母 → 补容量或减流 → 用生产指标持续校准。反直觉加分点：余量是可验证的故障预算。</span>
+    <span class="ans">答题骨架：业务峰值与形状 → 压测验证容量 → 水位起步值 0.7（按误差、冗余、故障域、恢复能力上下调） → 按故障场景重算分母 → 补容量或减流 → 用生产指标持续校准。反直觉加分点：余量是可验证的故障预算。</span>
   </div>
 </div>
 

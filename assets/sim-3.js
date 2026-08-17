@@ -5,7 +5,28 @@
 var cv = document.getElementById('chart');
 if (!cv) return;
 var ctx = cv.getContext('2d');
-var W = cv.width, H = cv.height;
+var W, H;
+function resizeCanvas(redraw){
+  var rect = cv.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  var dpr = window.devicePixelRatio || 1;
+  W = rect.width; H = rect.height;
+  cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  if (redraw && S){
+    try { draw(); } catch (e) {}
+  }
+}
+resizeCanvas();
+var resizeTimer = null;
+function scheduleResize(){
+  if (document.hidden || resizeTimer) return;
+  resizeTimer = setTimeout(function(){
+    resizeTimer = null;
+    if (!document.hidden) resizeCanvas(true);
+  }, 150);
+}
+window.addEventListener('resize', scheduleResize);
 var WINDOW = 20;
 
 var DT = 0.1;
