@@ -232,6 +232,8 @@ table.tbl th{font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:v
 table.tbl td{padding:13px 14px;border-bottom:1px solid var(--line);vertical-align:top;line-height:1.75}
 table.tbl tr:last-child td{border-bottom:0}
 table.tbl td.ch{font-family:var(--mono);font-size:12.5px;color:var(--faint);white-space:nowrap}
+/* 首列是标签列：其余列文字长会抢走宽度，把它挤成每行两三个字。给它一个下限。 */
+table.tbl th:first-child,table.tbl td:first-child{min-width:118px}
 table.tbl a{color:var(--teal);text-decoration:none;border-bottom:1px solid rgba(63,210,199,.3)}
 table.tbl a:hover{border-bottom-color:var(--teal)}
 table.tbl td b{color:#AFC6FF}
