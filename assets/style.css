@@ -282,3 +282,29 @@ h2 .sec{color:var(--muted)}
 .sim-metric .k{color:var(--muted)}
 .sim-log .tt{color:var(--muted)}
 .foot-in{color:var(--muted)}
+
+/* ---------- v2 · 交卷练习（先写、后揭晓）----------
+   全书唯一要求读者从空白页产出的机制。无任何存储：答案只活在当前会话的 DOM 里。 */
+.exercise{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--teal);
+  border-radius:14px;padding:22px 22px 18px;margin:34px 0}
+.exercise-tag{font-family:var(--mono);font-size:12px;color:var(--bg);background:var(--teal);display:inline-block;
+  padding:3px 10px;border-radius:99px;letter-spacing:.12em;font-weight:700;margin-bottom:12px}
+.exercise h3{margin-top:2px}
+.ex-input{display:block;width:100%;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;
+  color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.8;padding:12px 14px;margin:12px 0 4px;
+  resize:vertical;min-height:96px}
+.ex-input:focus{outline:2px solid var(--teal);outline-offset:2px}
+.ex-hint{font-size:13.5px;color:var(--muted);margin:8px 0 12px;line-height:1.75}
+.ex-warn{display:none;color:var(--amber);font-size:14.5px;margin:10px 0 0;line-height:1.8}
+.ex-warn.show{display:block}
+.ex-model{display:none;border-top:1px solid var(--line);margin-top:18px;padding-top:16px}
+.ex-model.show{display:block}
+.ex-model h4{font-size:16px;font-weight:650;color:#F0F4FF;margin:18px 0 6px}
+.ex-model h4:first-child{margin-top:0}
+
+/* ---------- v2 · 条件翻转（同一道权衡题，换一个约束再选一次）---------- */
+.flip{background:var(--panel-2);border:1px dashed var(--amber);border-radius:12px;
+  padding:16px 20px 6px;margin:20px 0 4px}
+.flip-tag{font-family:var(--mono);font-size:11.5px;color:var(--amber);letter-spacing:.14em;
+  font-weight:700;display:block;margin-bottom:8px}
+.flip > p:first-of-type{margin-top:0}

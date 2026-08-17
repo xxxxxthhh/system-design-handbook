@@ -93,6 +93,19 @@ def check_page(path: pathlib.Path, all_names):
         if f'id="v-{q}"' not in html:
             errs.append(f"quiz {q} missing verdict #v-{q}")
 
+    # A11 v2 条件翻转：每个 data-f="N" 必须有对应的 #v-fN
+    for f in set(re.findall(r'data-f="([\w-]+)"', html)):
+        if f'id="v-f{f}"' not in html:
+            errs.append(f"flip f{f} missing verdict #v-f{f}")
+
+    # A12 v2 交卷练习：.exercise 必须齐备三件套，否则交互失效
+    n_ex = len(re.findall(r'class="exercise"', html))
+    if n_ex:
+        for cls, name in (("ex-input", "输入框"), ("ex-reveal", "揭晓按钮"), ("ex-model", "基准答案块")):
+            n = len(re.findall(rf'class="[^"]*\b{cls}\b', html))
+            if n < n_ex:
+                errs.append(f".exercise {n_ex} 个，但 .{cls}（{name}）只有 {n} 个")
+
     for word in FORBIDDEN:
         if word in html:
             errs.append(f"forbidden token: {word}")

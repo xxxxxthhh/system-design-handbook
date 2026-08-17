@@ -94,65 +94,84 @@
   </div>
 </div>
 
-<p>代进「秒抢」首月的目标。老陈拍的数字是首月做到 <strong>2 万 DAU</strong>；你估每人每天大约 <strong>30 次请求</strong>（翻场次列表、搜索、看详情、下单各若干次）：</p>
+<p>老陈没有给你数字，只给了三句业务描述：「秒抢」首月要撑得住一场和这次差不多量级的独家开票；这场演出<strong>在售 5,000 张</strong>；他的原话是「先把量级估对，机器我批」。</p>
 
-<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
-  <div class="metric"><div class="k">DAU</div><div class="v">20,000</div><div class="d">首月目标</div></div>
-  <div class="metric"><div class="k">人均请求</div><div class="v">30</div><div class="d">次 / 天</div></div>
-  <div class="metric"><div class="k">日请求量</div><div class="v">60 万</div><div class="d">次 / 天</div></div>
-  <div class="metric"><div class="k">平均 QPS</div><div class="v" style="color:var(--green)">≈ 7</div><div class="d">600,000 ÷ 86,400</div></div>
-  <div class="metric"><div class="k">日常峰值</div><div class="v" style="color:var(--green)">≈ 70</div><div class="d">×10 倍</div></div>
+<div class="exercise">
+  <span class="exercise-tag">交卷 E1</span>
+  <h3>只凭这三句话，把「秒抢」首月的容量估出来</h3>
+  <p>要交什么：① DAU 区间　② 人均请求数（次/天）区间　③ 日常峰值倍数区间　④ 单次响应大小区间　⑤ 平均响应时间（RT）区间——<strong>五个数都要给上下界，不要给单点值</strong>；⑥ 这五个假设里你最不确定的是哪一个，为什么；⑦ 用你自己估出的日常峰值 QPS，除以你假设的「单机实测安全吞吐」，给出一个机器数区间——<strong>算到 QPS 就停下是没交完的答案</strong>。</p>
+  <textarea class="ex-input" rows="9" placeholder="① DAU：…&#10;② 人均请求：…&#10;③ 峰值倍数：…&#10;④ 响应大小：…&#10;⑤ RT：…&#10;⑥ 最不确定的假设：…&#10;⑦ 机器数区间：…"></textarea>
+  <p class="ex-hint">写不出上下界、只写得出一个「拍脑袋数字」也要写——那本身就是有用的诊断。这五个数没有标准答案，「秒抢」的取值只是一份参考解，不是唯一解。答案不会被保存，刷新即失。</p>
+  <button class="btn primary ex-reveal">我写完了，展开基准答案</button>
+  <p class="ex-warn">你还没写。这一页是全书唯一考你独立输出的地方，先写下来再看——再点一次仍会展开。</p>
+  <div class="ex-model">
+    <h4>基准答案 · 「秒抢」的取值</h4>
+    <p>老陈拍的数字是首月做到 <strong>2 万 DAU</strong>；估每人每天大约 <strong>30 次请求</strong>（翻场次列表、搜索、看详情、下单各若干次）；日常峰值倍数按 <strong>×10</strong>（参考同类电商大促的经验区间 6–15 倍，取中间偏保守）：</p>
+    <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      <div class="metric"><div class="k">DAU</div><div class="v">20,000</div><div class="d">首月目标</div></div>
+      <div class="metric"><div class="k">人均请求</div><div class="v">30</div><div class="d">次 / 天</div></div>
+      <div class="metric"><div class="k">日请求量</div><div class="v">60 万</div><div class="d">次 / 天</div></div>
+      <div class="metric"><div class="k">平均 QPS</div><div class="v" style="color:var(--green)">≈ 7</div><div class="d">600,000 ÷ 86,400</div></div>
+      <div class="metric"><div class="k">日常峰值</div><div class="v" style="color:var(--green)">≈ 70</div><div class="d">×10 倍</div></div>
+    </div>
+    <p>7 QPS。日常峰值 70 QPS。<strong>一台四核机器打着哈欠就能接住。</strong>如果故事到此为止，这本书就只有一章。</p>
+    <p>但「秒抢」不是普通网站。它的流量不是一条平缓的曲线，而是一根针。把开票那一刻单独算一次：</p>
+    <div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+      <div class="metric"><div class="k">在售票数</div><div class="v">5,000</div><div class="d">张</div></div>
+      <div class="metric"><div class="k">蹲点人数</div><div class="v">50,000</div><div class="d">人（10 倍超卖需求）</div></div>
+      <div class="metric"><div class="k">抢购窗口</div><div class="v">10</div><div class="d">秒</div></div>
+      <div class="metric"><div class="k">人均请求</div><div class="v">3</div><div class="d">次（刷新 + 下单）</div></div>
+      <div class="metric"><div class="k">瞬时 QPS</div><div class="v" style="color:var(--red)">15,000</div><div class="d up">▲ 平均值的约 2,000 倍</div></div>
+    </div>
+    <p>50,000 × 3 = 150,000 次请求，压在 10 秒里，就是 <strong>15,000 QPS</strong>。它和你算出来的平均值 7 QPS 之间差了<em>约 2,000 倍</em>。</p>
+    <div class="kicker">这个 2,000 倍是本书的起点。<strong>按平均值设计的系统，会被峰值杀死；按峰值堆机器的公司，会被账单杀死。</strong>整本书讲的就是怎么在这两者之间活下来——而不是二选一。</div>
+    <h4>另外两笔账：存储与带宽</h4>
+    <p>容量估算不只有 QPS。同样的三步法换个乘数就能用——响应大小和 RT 就是①②③之外你要交的另外两个数：</p>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead>
+          <tr><th>估什么</th><th>怎么算</th><th>「秒抢」首年</th><th>它告诉你什么</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>存储</strong></td>
+            <td>单行字节 × 日增行数 × 天数</td>
+            <td>订单行约 500 B，日均约 2,000 单 → 每天约 1 MB，一年约 <strong>365 MB</strong></td>
+            <td>订单表一年不到 1 GB。<strong>单机 MySQL 能撑很久</strong>——所以分库分表不是第 2 章的事，是第 8 章的事</td>
+          </tr>
+          <tr>
+            <td><strong>带宽</strong></td>
+            <td>单次响应字节 × QPS</td>
+            <td>详情页首屏约 300 KB。日常峰值 70 QPS → 约 21 MB/s（约 168 Mbps）</td>
+            <td>日常可控。但开票瞬间 15,000 QPS × 300 KB ≈ <strong>4.5 GB/s</strong>——这个数字不可能由你的机房出，只能由 CDN 出（第 12 章）</td>
+          </tr>
+          <tr>
+            <td><strong>连接</strong></td>
+            <td>并发数 ≈ QPS × 平均响应时间</td>
+            <td>70 QPS × 0.2s ≈ <strong>14 个并发</strong>；15,000 QPS × 0.2s ≈ <strong>3,000 个并发</strong></td>
+            <td>这条式子（Little's Law）是第 2 章的主角，也是你第一次宕机的死因</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <h4>从 QPS 到机器数：别停在 QPS</h4>
+    <p>15,000 QPS 本身不能拿去跟老陈要机器——你要的是<strong>机器数区间</strong>。此刻你还没做过真实压测，只能先给一个假设区间：<strong>单机实测安全吞吐约 400–500 QPS</strong>。这个区间不是拍的：本章 ·6 复盘会给你这个数的来处——上线那夜 23:48 你会打一轮压测，200 QPS 时 P99 180ms、CPU 只到 40%，说明离饱和还有余量，线性外推到 CPU 打满大约是 400–500 QPS。15,000 ÷ 500 ≈ <strong>30 台</strong>，15,000 ÷ 400 ≈ <strong>38 台</strong>，区间取 <strong>30–38 台</strong>，并留出压测误差的富余，报给老陈的数字可以直接说「30 到 40 台，最终以压测收敛」。到了 ·6 你会看到，次日真实开票只跑到约 900 QPS、远低于 15,000——那不是估算错了，是这次入口只放了一个链接、人流被自然摊平；<strong>预算是按「被打满」的那种日子备的，不是按「运气好」的那种日子备的</strong>。</p>
+    <h4>① 哪个假设最敏感</h4>
+    <p>五个数在公式里都是线性放大器，误差 1 倍、结果就错 1 倍——单看数学，谁都一样敏感。真正拉开差距的是<strong>你能把误差压到多窄</strong>：DAU 是老陈拍的业务目标，人均请求有同类产品的经验值兜底，两者一般能收敛到 ±50% 以内；<strong>蹲点人数相对在售票量的倍数</strong>（这里假设 10 倍超卖需求）却是纯粹的猜测——没开过票，你不知道会不会来 5 倍人，也不知道会不会来 30 倍人。同样是「差一倍」，DAU 差一倍是没做好市场调研，这个倍数差一倍是正常。它被低估到 5 倍，瞬时 QPS 腰斩到约 7,500；被低估到 20 倍，瞬时 QPS 翻倍到约 30,000——机器数区间从「30–38 台」摆到「15–19 台」或「60–75 台」。这就是它最不确定的原因：不是数学上更敏感，是取值范围本身没有底。</p>
+    <h4>② 下一步压测什么</h4>
+    <p>两件事按顺序做：先在生产同规格机器上把单接口打到 P99 明显劣化的拐点，把「单机实测安全吞吐 400–500 QPS」这个假设换成真实数字——本章 ·6 复盘那次 23:48 的压测就是这一步的雏形，只是强度不够、没打到拐点，真要收敛这个数得往上继续加压。再找一场更小的演出提前开票，实测真实的蹲点人数/在售票量比例，把「10 倍超卖需求」这个最敏感的假设换成有数据支撑的区间。两件事换掉的分别是分母（单机吞吐）和分子（真实峰值 QPS）里误差最大的那个。</p>
+    <h4>自评：你的答案里有没有这几样</h4>
+    <ul>
+      <li>五个数<strong>每个都有上下界</strong>，不是单点值——上下界差太小（比如 ±10%）说明你在假装精确，不是在估算。</li>
+      <li>指出了<strong>哪个假设最敏感</strong>，并且说出了「敏感」的理由，而不是随口挑一个。</li>
+      <li>算出了<strong>日常峰值 QPS</strong> 和一个明显更极端的<strong>尖峰场景 QPS</strong>——如果只算了前者，你会漏掉这一章真正的教训。</li>
+      <li>把峰值 QPS<strong>换算成了机器数区间</strong>，而不是停在 QPS 上——机器数才是能拿去跟老板要预算的数字。</li>
+      <li>提出了具体的<strong>下一步验证动作</strong>（压测什么、怎么压），而不是「多测试一下」这种无法执行的话。</li>
+    </ul>
+  </div>
 </div>
 
-<p>7 QPS。日常峰值 70 QPS。<strong>一台四核机器打着哈欠就能接住。</strong>如果故事到此为止，这本书就只有一章。</p>
-
-<p>但「秒抢」不是普通网站。它的流量不是一条平缓的曲线，而是一根针。把开票那一刻单独算一次：</p>
-
-<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
-  <div class="metric"><div class="k">在售票数</div><div class="v">5,000</div><div class="d">张</div></div>
-  <div class="metric"><div class="k">蹲点人数</div><div class="v">50,000</div><div class="d">人（10 倍超卖需求）</div></div>
-  <div class="metric"><div class="k">抢购窗口</div><div class="v">10</div><div class="d">秒</div></div>
-  <div class="metric"><div class="k">人均请求</div><div class="v">3</div><div class="d">次（刷新 + 下单）</div></div>
-  <div class="metric"><div class="k">瞬时 QPS</div><div class="v" style="color:var(--red)">15,000</div><div class="d up">▲ 平均值的约 2,000 倍</div></div>
-</div>
-
-<p>50,000 × 3 = 150,000 次请求，压在 10 秒里，就是 <strong>15,000 QPS</strong>。它和你算出来的平均值 7 QPS 之间差了<em>约 2,000 倍</em>。</p>
-
-<div class="kicker">这个 2,000 倍是本书的起点。<strong>按平均值设计的系统，会被峰值杀死；按峰值堆机器的公司，会被账单杀死。</strong>整本书讲的就是怎么在这两者之间活下来——而不是二选一。</div>
-
-<h3>另外两笔账：存储与带宽</h3>
-
-<p>容量估算不只有 QPS。同样的三步法换个乘数就能用：</p>
-
-<div class="tbl-wrap">
-  <table class="tbl">
-    <thead>
-      <tr><th>估什么</th><th>怎么算</th><th>「秒抢」首年</th><th>它告诉你什么</th></tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><strong>存储</strong></td>
-        <td>单行字节 × 日增行数 × 天数</td>
-        <td>订单行约 500 B，日均约 2,000 单 → 每天约 1 MB，一年约 <strong>365 MB</strong></td>
-        <td>订单表一年不到 1 GB。<strong>单机 MySQL 能撑很久</strong>——所以分库分表不是第 2 章的事，是第 8 章的事</td>
-      </tr>
-      <tr>
-        <td><strong>带宽</strong></td>
-        <td>单次响应字节 × QPS</td>
-        <td>详情页首屏约 300 KB。日常峰值 70 QPS → 约 21 MB/s（约 168 Mbps）</td>
-        <td>日常可控。但开票瞬间 15,000 QPS × 300 KB ≈ <strong>4.5 GB/s</strong>——这个数字不可能由你的机房出，只能由 CDN 出（第 12 章）</td>
-      </tr>
-      <tr>
-        <td><strong>连接</strong></td>
-        <td>并发数 ≈ QPS × 平均响应时间</td>
-        <td>70 QPS × 0.2s ≈ <strong>14 个并发</strong>；15,000 QPS × 0.2s ≈ <strong>3,000 个并发</strong></td>
-        <td>这条式子（Little's Law）是第 2 章的主角，也是你第一次宕机的死因</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-<p>三笔账算完，结论出奇地一致：<strong>日常流量根本不需要复杂架构，而峰值流量再复杂的架构也未必扛得住。</strong>所以第一版就该简单——简单到你能在两周内写完、能在出事时看懂。</p>
+<p>无论你算出的具体倍数是多少，这一章要教的规律都成立：日常均值和真正的抢购尖峰之间，差的不是百分之几十，而是数量级——这也是后面十五章要处理的核心矛盾。三笔账算完，结论出奇地一致：<strong>日常流量根本不需要复杂架构，而峰值流量再复杂的架构也未必扛得住。</strong>所以第一版就该简单——简单到你能在两周内写完、能在出事时看懂。</p>
 
 <!-- ================= 基线架构图 ================= -->
 <h2><span class="sec">01 · 3 基线架构图</span>全书的第 0 帧</h2>

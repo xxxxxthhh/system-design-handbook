@@ -32,6 +32,12 @@ RUNTIME_CLASSES = {
     "state-健康", "state-承压", "state-过载", "state-宕机",
 }
 
+# 纯 JS 钩子类：只用于 querySelector 定位，样式由同元素上的其它 class 提供。
+# 它们**不应该**有 CSS 定义——在这里登记，避免审计器把「故意没有样式」误报成缺失。
+JS_HOOK_CLASSES = {
+    "ex-reveal",   # book.js：交卷按钮，视觉由 .btn.primary 提供
+}
+
 used = collections.defaultdict(set)          # class -> {页面}
 pages = sorted(p for p in ROOT.glob("*.html"))
 if not pages:
@@ -81,11 +87,11 @@ for p in pages:
 
 # 1 用了但没定义
 for c, where in sorted(used.items()):
-    if c not in defined and c not in RUNTIME_CLASSES:
+    if c not in defined and c not in RUNTIME_CLASSES and c not in JS_HOOK_CLASSES:
         errs.append(f"class .{c} 被使用但 style.css 中无定义 → 会渲染成无样式元素（{sorted(where)[:3]}）")
 
 # 6 死 CSS（仅提示）
-unused = sorted(defined - set(used) - RUNTIME_CLASSES)
+unused = sorted(defined - set(used) - RUNTIME_CLASSES - JS_HOOK_CLASSES)
 if unused:
     notes.append(f"style.css 中定义但全站未使用的 class（{len(unused)}）: {unused}")
 

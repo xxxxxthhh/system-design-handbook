@@ -310,3 +310,57 @@
 | 来源清单 | `.sources` + 正文里的 `.srcref` |
 | 表格 | `.tbl-wrap` > `table.tbl` |
 | 目录 | `.toc` > `.toc-part` + `a.toc-item`(`.toc-num`/`.toc-t`/`.toc-d`/`.toc-tags`) |
+
+---
+
+## D. v2 新增组件（交卷练习 / 条件翻转）
+
+### D.1 `.exercise` —— 先交卷，后揭晓
+
+全书唯一要求读者**从空白页产出**的机制。**无任何存储**：答案只活在当前会话的 DOM 里，
+刷新即失——这是刻意的，也要在文案里对读者讲明白。
+
+```html
+<div class="exercise">
+  <span class="exercise-tag">交卷 E1</span>
+  <h3>题目一句话</h3>
+  <p>要交什么：列清楚 3–5 个具体产出物，每个都要能被自己检查。</p>
+  <textarea class="ex-input" rows="8" placeholder="① …&#10;② …&#10;③ …"></textarea>
+  <p class="ex-hint">写不出来也要写下卡在哪一步——那本身就是有用的诊断。答案不会被保存。</p>
+  <button class="btn primary ex-reveal">我写完了，展开基准答案</button>
+  <p class="ex-warn">你还没写。这一页是全书唯一考你独立输出的地方，先写下来再看——再点一次仍会展开。</p>
+  <div class="ex-model">
+    <h4>基准答案 · ①…</h4>
+    <p>…</p>
+    <h4>自评：你的答案里有没有这几样</h4>
+    <ul><li>…</li></ul>
+  </div>
+</div>
+```
+
+- 输入框空着时点按钮 → 只显示 `.ex-warn`，**再点一次才展开**（做摩擦，不做强制）
+- 展开后按钮禁用并变成「基准答案已展开」
+- **基准答案必须包含一个自评清单**，否则读者无法判断自己写的够不够
+- 校验器 A12 会检查 `.exercise` 与 `.ex-input`/`.ex-reveal`/`.ex-model` 数量匹配
+
+### D.2 `.flip` —— 条件翻转
+
+挂在某个 D2 的 `.verdict` **之后**，改掉一个约束，要求重新选择。
+用 `data-f="N"` 对应 `id="v-fN"`（**不要**用 `data-d`，否则会破坏「每章恰好 2 个 decision」的计数）。
+
+```html
+<div class="flip">
+  <span class="flip-tag">条件翻转</span>
+  <p>现在把「<strong>某个约束</strong>」改成「<strong>另一个值</strong>」。你刚才的选择还成立吗？</p>
+  <button class="opt" data-f="10" data-k="mid"><span class="tag">A</span>…</button>
+  <button class="opt" data-f="10" data-k="mid"><span class="tag">B</span>…</button>
+  <div class="verdict" id="v-f10">
+    <p><b class="mid">翻转变量是「…」。</b>…为什么这个事实一变，最优解就换人…</p>
+  </div>
+</div>
+```
+
+- `data-f` 的值**全站唯一**（建议用章号，如 ch10 用 `10`、ch12 用 `12`）
+- 判词必须**点名「翻转变量」**——这才是这个组件存在的意义：
+  训练读者说出「什么事实会改变我的决定」，而不是记住某个固定偏好
+- 校验器 A11 会检查 `data-f="N"` 与 `#v-fN` 配对
