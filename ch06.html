@@ -70,39 +70,25 @@
 <p>扩容来不及，60,800 也不会因为你盯着大盘就变成 15,000。线索指向同一件事：先把进入核心系统的总量封顶，再从配额里优先保住下单、支付与退款；推荐、榜单和历史订单可以返回简化页或稍后重试。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是 14:06。你的第一个动作是什么？</h3>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">A</span>
-    立刻把应用实例扩成五倍，等待自动扩容完成
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>立刻把应用实例扩成五倍，等待自动扩容完成
   </button>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">B</span>
-    让客户端遇到 5xx 后立即重试三次，提高成功机会
+    <button class="opt" data-d="1" data-k="good"><span class="tag">B</span>网关总配额设为 15,000 QPS，优先交易；关闭推荐、榜单和历史订单
   </button>
-  <button class="opt" data-d="1" data-k="good">
-    <span class="tag">C</span>
-    网关总配额设为 15,000 QPS，优先交易；关闭推荐、榜单和历史订单
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>让客户端遇到 5xx 后立即重试三次，提高成功机会
   </button>
-  <button class="opt" data-d="1" data-k="mid">
-    <span class="tag">D</span>
-    把数据库连接池和工作线程都调大五倍
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>把数据库连接池和工作线程都调大五倍
   </button>
-  <div class="verdict" id="v-d1">
-    <p>
-      <b class="good">C 是教科书答案：先选择谁能进入。</b>
-      15,000 QPS 是压测验证过的安全吞吐，网关先封顶总量，再把配额留给下单、支付、退款。非核心功能返回降级结果，用户会少看到一些内容，但交易链路获得确定的资源边界。
-    </p>
-    <p>
-      <b class="bad">A 的问题是时间与瓶颈位置。</b>
+    <div class="verdict" id="v-d1">
+    <p><b class="bad">A的问题是时间与瓶颈位置。</b>
       拉起实例、预热缓存和建立连接按分钟计，系统按秒恶化；应用扩成五倍也不会让数据库容量同步变成五倍。扩容是恢复容量的后续动作，不是此刻的入口刹车。
     </p>
-    <p>
-      <b class="bad">B 会让事情更糟。</b>
+    <p><b class="good">B是教科书答案：先选择谁能进入。</b>
+      15,000 QPS 是压测验证过的安全吞吐，网关先封顶总量，再把配额留给下单、支付、退款。非核心功能返回降级结果，用户会少看到一些内容，但交易链路获得确定的资源边界。
+    </p>
+    <p><b class="bad">C会让事情更糟。</b>
       60,800 QPS 若失败后立即尝试三次，最坏会把重试流量叠到原请求上。第 7 章会完整拆解这类“为了成功而重试，结果把下游压死”的放大链。
     </p>
-    <p>
-      <b class="mid">D 方向没错，但救不了现在。</b>
+    <p><b class="mid">D方向没错，但救不了现在。</b>
       若瓶颈真在过小的应用池，适度调整可能有用；但当前到达量已是验证容量约四倍。把并发闸门开大，只会让更多请求同时争抢下游，必须先把总量压住。
     </p>
   </div>

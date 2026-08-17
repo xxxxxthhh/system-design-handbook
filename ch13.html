@@ -72,29 +72,19 @@
 <p>老陈把半年前的发布报表放到旁边：单体时代，30 人改同一个仓库，冲突、全量回归和发布窗口让小改动排三天。拆分确实解开了发布队列，却没有让业务复杂度消失；它把原来编译器和事务能看见的关系，搬到了网络和异步消息里。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是周三 16:40。两周排障仍无结论，你先改变什么？</h3>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">A</span>
-    要求九个服务团队各自再查一遍日志，找出错误率最高的组件
+    <button class="opt" data-d="1" data-k="good"><span class="tag">A</span>按订单业务键贯穿同步调用、消息和补偿，采集一批完整端到端 trace
   </button>
-  <button class="opt" data-d="1" data-k="good">
-    <span class="tag">B</span>
-    按订单业务键贯穿同步调用、消息和补偿，采集一批完整端到端 trace
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>要求九个服务团队各自再查一遍日志，找出错误率最高的组件
   </button>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">C</span>
-    把七套超时统一延长到 10 秒，减少误判失败
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>把七套超时统一延长到 10 秒，减少误判失败
   </button>
-  <button class="opt" data-d="1" data-k="mid">
-    <span class="tag">D</span>
-    暂停九个服务的发布，冻结变量后继续观察
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>暂停九个服务的发布，冻结变量后继续观察
   </button>
-  <div class="verdict" id="v-d1">
-    <p><b class="good">B 是教科书答案：把局部证词串成一次用户旅程。</b>用订单业务键连接 HTTP、消息和补偿，才能看见「库存已成功—订单超时—补偿释放—支付迟到」这条跨边界时序。先获取端到端证据，再决定谁修。</p>
-    <p><b class="bad">A 会重复过去两周。</b>局部错误率最高不等于根因；本次每个服务都在阈值内，故障恰好藏在它们之间。让团队继续各看各的大盘，只会得到更多无法拼接的正常截图。</p>
-    <p><b class="bad">C 可能把故障拖得更长。</b>统一长超时会占住线程与连接，把快速失败变成排队；而库存已成功、上游未知的问题并不会因多等几秒自动获得幂等语义。超时必须从端到端预算向下分配。</p>
-    <p><b class="mid">D 方向有价值，但证据仍不完整。</b>冻结发布能缩小变量集，适合作为并行动作；它无法重建已经断掉的调用链，也不能解释历史受影响订单。先补关联标识和关键采样。</p>
+    <div class="verdict" id="v-d1">
+    <p><b class="good">A是教科书答案：把局部证词串成一次用户旅程。</b>用订单业务键连接 HTTP、消息和补偿，才能看见「库存已成功—订单超时—补偿释放—支付迟到」这条跨边界时序。先获取端到端证据，再决定谁修。</p>
+    <p><b class="bad">B会重复过去两周。</b>局部错误率最高不等于根因；本次每个服务都在阈值内，故障恰好藏在它们之间。让团队继续各看各的大盘，只会得到更多无法拼接的正常截图。</p>
+    <p><b class="bad">C可能把故障拖得更长。</b>统一长超时会占住线程与连接，把快速失败变成排队；而库存已成功、上游未知的问题并不会因多等几秒自动获得幂等语义。超时必须从端到端预算向下分配。</p>
+    <p><b class="mid">D方向有价值，但证据仍不完整。</b>冻结发布能缩小变量集，适合作为并行动作；它无法重建已经断掉的调用链，也不能解释历史受影响订单。先补关联标识和关键采样。</p>
   </div>
 </div>
 

@@ -67,44 +67,30 @@
   </div>
 </div>
 
-<p>连接池只有 50 个槽，入口却在一分多钟里涨到平时约 6.8 倍。拿到连接的请求仍能在几十毫秒内完成 SQL；拿不到连接的 1,842 个请求则在应用里排队。它们等满 8 秒，被网关切断，最终被翻译成 502。</p>
+<p>连接池只有 50 个槽（第 1 章上线时是 20，随机器扩容一路调到 50），入口却在一分多钟里涨到平时约 6.8 倍。拿到连接的请求仍能在几十毫秒内完成 SQL；拿不到连接的 1,842 个请求则在应用里排队。它们等满 8 秒，被网关切断，最终被翻译成 502。</p>
 
 <p>老陈在电话里问：「加连接，还是砍流量？」你看着 DB CPU 43% 和连接池等待队列，知道这不是“SQL 全慢了”。此刻要先决定的是：让多少请求进入有限的服务槽，而不是给等待队列换一个更深的坑。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是 23:11。你的第一个动作是什么？</h3>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">A</span>
-    把连接池从 50 直接调到 500，先让排队请求都拿到连接
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>把连接池从 50 直接调到 500，先让排队请求都拿到连接
   </button>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">B</span>
-    重启两台应用，清空 1,842 个等待请求
+    <button class="opt" data-d="1" data-k="good"><span class="tag">B</span>在入口把并发压到 40，连接等待超过 200ms 就快速失败
   </button>
-  <button class="opt" data-d="1" data-k="good">
-    <span class="tag">C</span>
-    在入口把并发压到 40，连接等待超过 200ms 就快速失败
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>重启两台应用，清空 1,842 个等待请求
   </button>
-  <button class="opt" data-d="1" data-k="mid">
-    <span class="tag">D</span>
-    立即抓慢查询并给订单列表 SQL 加索引
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>立即抓慢查询并给订单列表 SQL 加索引
   </button>
-  <div class="verdict" id="v-d1">
-    <p>
-      <b class="good">C 是教科书答案：先让到达量低于服务能力。</b>
-      把入口并发压到连接池能稳定承受的范围，超出的请求在 200ms 内明确失败，连接槽便能开始周转。部分用户要重试，但存活请求不再和 1,842 个等待者争同一口气。
-    </p>
-    <p>
-      <b class="bad">A 的问题是没有先问下游账单。</b>
+    <div class="verdict" id="v-d1">
+    <p><b class="bad">A的问题是没有先问下游账单。</b>
       500 条并发连接可能把目前只有 43% CPU 的数据库瞬间推满；即便 DB 扛住，应用线程、内存和锁竞争也会把等待搬到下一层。池大小是并发上限，不是凭空出现的处理能力。
     </p>
-    <p>
-      <b class="bad">B 会让事情更糟。</b>
+    <p><b class="good">B是教科书答案：先让到达量低于服务能力。</b>
+      把入口并发压到连接池能稳定承受的范围，超出的请求在 200ms 内明确失败，连接槽便能开始周转。部分用户要重试，但存活请求不再和 1,842 个等待者争同一口气。
+    </p>
+    <p><b class="bad">C会让事情更糟。</b>
       重启只会让已等待的请求失败一次，入口 486 QPS 会立刻把空池重新灌满；两台应用同时重连，还可能在数据库上制造连接风暴。队列被清空，不等于到达率变小。
     </p>
-    <p>
-      <b class="mid">D 方向没错，但救不了现在。</b>
+    <p><b class="mid">D方向没错，但救不了现在。</b>
       慢查询值得查，可眼前 DB 查询 P99 只有 41ms，与平时接近。索引评估和发布按分钟到小时计，502 正按秒增加；先止血，再确认哪段服务时间值得优化。
     </p>
   </div>

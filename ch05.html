@@ -47,17 +47,15 @@
 <p>线索已经足够拼出剧情：滚动升级重启了缓存节点，<strong>内存里的数据没了</strong>。凌晨流量虽然只有白天的零头，但命中率从 98% 跌到 2%，意味着原本由缓存挡住的查询几乎全部砸向了数据库——DB 正在被它平时流量 40 多倍的洪水冲刷。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是 02:49。你的第一个动作是什么？</h3>
-  <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>紧急给数据库扩容，加从库、升配置</button>
-  <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>重启订单服务，清掉积压的线程池队列</button>
-  <button class="opt" data-d="1" data-k="good"><span class="tag">C</span>在网关层限流：只放行 DB 能承受的流量，其余直接快速失败</button>
-  <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>打电话让运维回滚 Redis 升级</button>
-  <div class="verdict" id="v-d1">
-    <p><b class="good">C 是教科书答案：先止血。</b>DB 此刻唯一需要的是喘息。把入口流量限到它容量的七八成，被拒绝的请求快速失败——用户看到「排队中，请稍后重试」，远好过整站无响应。只有 DB 活着，缓存才有机会回填（一会儿你会在模拟器里亲眼看到为什么）。</p>
-    <p><b class="bad">A 的问题是时间。</b>扩容从库要做主从同步，新实例灌满数据是分钟级到小时级的事，而你的系统正在以秒为单位恶化。故障中扩容是常见的本能反应，也是常见的无效动作。</p>
-    <p><b class="bad">B 会让事情更糟。</b>重启只是把队列清空一次，请求马上会重新灌满它；如果应用层还有本地缓存，重启连这最后一层缓冲也一起清掉了。</p>
-    <p><b class="mid">D 方向没错，但救不了现在。</b>回滚的是<em>程序版本</em>，不是<em>内存数据</em>——缓存里的数据已经没了，回滚不会让它回来。该联系运维，但不是做这件事。</p>
+    <button class="opt" data-d="1" data-k="good"><span class="tag">A</span>在网关层限流：只放行 DB 能承受的流量，其余直接快速失败</button>
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>重启订单服务，清掉积压的线程池队列</button>
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>紧急给数据库扩容，加从库、升配置</button>
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>打电话让运维回滚 Redis 升级</button>
+    <div class="verdict" id="v-d1">
+    <p><b class="good">A是教科书答案：先止血。</b>DB 此刻唯一需要的是喘息。把入口流量限到它容量的七八成，被拒绝的请求快速失败——用户看到「排队中，请稍后重试」，远好过整站无响应。只有 DB 活着，缓存才有机会回填（一会儿你会在模拟器里亲眼看到为什么）。</p>
+    <p><b class="bad">B会让事情更糟。</b>重启只是把队列清空一次，请求马上会重新灌满它；如果应用层还有本地缓存，重启连这最后一层缓冲也一起清掉了。</p>
+    <p><b class="bad">C的问题是时间。</b>扩容从库要做主从同步，新实例灌满数据是分钟级到小时级的事，而你的系统正在以秒为单位恶化。故障中扩容是常见的本能反应，也是常见的无效动作。</p>
+    <p><b class="mid">D方向没错，但救不了现在。</b>回滚的是<em>程序版本</em>，不是<em>内存数据</em>——缓存里的数据已经没了，回滚不会让它回来。该联系运维，但不是做这件事。</p>
   </div>
 </div>
 
@@ -125,7 +123,7 @@ DB 承受的流量 = 总流量 × ( 1 − 命中率 )
     <div class="case-row"><div class="lbl">症状</div><div class="val"><span class="sym">███▁▁▁▁</span>　断崖塌方型。命中率垂直下坠；DB QPS 阶跃式打满并持续；线程池排队、上游超时，故障沿调用链向上蔓延成级联故障（病历卡 No.09）。</div></div>
     <div class="case-row"><div class="lbl">易发场景</div><div class="val">定时任务统一写缓存；缓存集群升级、重启、故障切换；容器整批调度重建——任何让「很多 key 的生死绑在同一时刻」的操作。</div></div>
     <div class="case-row"><div class="lbl">处方</div><div class="val">① <strong>TTL 加随机抖动</strong>：3600 秒变成 3600±600 秒，把同一时刻的过期洪峰摊平成细流；② <strong>集群高可用</strong>：主从 + 持久化 + 分片，避免「重启 = 数据清零」；③ <strong>熔断限流兜底</strong>：假设雪崩终会发生，确保 DB 在最坏情况下只收到它能承受的流量；④ <strong>预热与慢放量</strong>：缓存恢复后不等于战斗结束——冷缓存需要先灌数据再逐步放开入口。</div></div>
-    <div class="case-row"><div class="lbl">案例</div><div class="val">Facebook 在 2010 年的一次著名故障中，因配置校验逻辑的错误，所有客户端将缓存值判为无效并同时涌向数据库集群，最终不得不整站下线才恢复，全程约两个半小时（官方复盘公开）。这次事故的完整推演是本 Part 实战关卡的姊妹篇。</div></div>
+    <div class="case-row"><div class="lbl">案例</div><div class="val">Facebook 在 2010 年的一次著名故障中，因配置校验逻辑的错误，所有客户端将缓存值判为无效并同时涌向数据库集群，最终不得不整站下线才恢复，全程约两个半小时（官方复盘公开）。这类「错误反馈把系统锁死在坏状态」的机理，附录图鉴里另有一张卡（No.16 亚稳态故障）专门收录。</div></div>
   </div>
 </div>
 

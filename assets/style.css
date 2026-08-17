@@ -286,7 +286,7 @@ h2 .sec{color:var(--muted)}
 .foot-in{color:var(--muted)}
 
 /* ---------- v2 · 交卷练习（先写、后揭晓）----------
-   全书唯一要求读者从空白页产出的机制。无任何存储：答案只活在当前会话的 DOM 里。 */
+   要求读者从空白页产出的机制。无任何存储：答案只活在当前会话的 DOM 里。 */
 .exercise{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--teal);
   border-radius:14px;padding:22px 22px 18px;margin:34px 0}
 .exercise-tag{font-family:var(--mono);font-size:12px;color:var(--bg);background:var(--teal);display:inline-block;

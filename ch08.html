@@ -70,39 +70,25 @@
 <p>林工摇头：「别先加第九台。取模扩容会让大部分订单搬家，8842 搬到新家后还是一个 key。」你需要先把热点从通用分片隔离出来，再决定扩容拓扑；否则在线迁移会与开票流量争 I/O，却不改变 62% 请求汇聚到一处的事实。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是 11:02。你的第一个动作是什么？</h3>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">A</span>
-    立即把 8 片取模改成 9 片，在线重算并迁移订单
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>立即把 8 片取模改成 9 片，在线重算并迁移订单
   </button>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">B</span>
-    把八个分片的连接池统一调大五倍
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>把八个分片的连接池统一调大五倍
   </button>
-  <button class="opt" data-d="1" data-k="good">
-    <span class="tag">C</span>
-    将 show_id=8842 切到独立热点通道，入口限流并按子桶打散
+    <button class="opt" data-d="1" data-k="good"><span class="tag">C</span>将 show_id=8842 切到独立热点通道，入口限流并按子桶打散
   </button>
-  <button class="opt" data-d="1" data-k="mid">
-    <span class="tag">D</span>
-    给订单表补一个 show_id 联合索引，等待发布
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>给订单表补一个 show_id 联合索引，等待发布
   </button>
-  <div class="verdict" id="v-d1">
-    <p>
-      <b class="good">C 是教科书答案：先把热点从共享分片摘出来。</b>
-      独立通道把 show_id=8842 的爆炸半径与普通订单隔离，入口配额保护其容量；若业务允许，再用用户或订单尾号分成子桶。七个健康分片不必陪热点一起迁移。
-    </p>
-    <p>
-      <b class="bad">A 的问题是迁移成本和问题不对症。</b>
+    <div class="verdict" id="v-d1">
+    <p><b class="bad">A的问题是迁移成本和问题不对症。</b>
       取模从 8 变 9 会让约 8/9 的 key 改变目标，开票中搬动大部分订单会消耗网络与 I/O；热点 key 即使落到新节点，62% 的流量仍集中在一个分片。
     </p>
-    <p>
-      <b class="bad">B 会让事情更糟。</b>
+    <p><b class="bad">B会让事情更糟。</b>
       七个分片本来就有余量，扩大它们的池没有收益；shard-03 已 100% CPU，更大连接池只会放入更多并发争用，让排队从应用搬到数据库。
     </p>
-    <p>
-      <b class="mid">D 方向没错，但救不了现在。</b>
+    <p><b class="good">C是教科书答案：先把热点从共享分片摘出来。</b>
+      独立通道把 show_id=8842 的爆炸半径与普通订单隔离，入口配额保护其容量；若业务允许，再用用户或订单尾号分成子桶。七个健康分片不必陪热点一起迁移。
+    </p>
+    <p><b class="mid">D方向没错，但救不了现在。</b>
       索引能降低单次查询成本，值得复核；可眼前负载偏斜接近 5 倍，发布索引还要与在线写争资源。先隔离热点，再在安全窗口验证查询计划。
     </p>
   </div>
@@ -291,7 +277,7 @@
   <ol>
     <li><strong>扩容搬家。</strong>取模模式用 4 台点「扩容一台」，再重置、切一致性哈希后重做 → 取模迁移约 80%（75%–85%），一致性哈希约 20%（12%–30%）。<strong>两者迁移量级分别接近 N/(N+1) 与 1/(N+1)。</strong></li>
     <li><strong>修平环。</strong>一致性哈希下把虚拟节点从 1 调到 150 → 最大负载/平均严格下降，150 时低于 1.30。<strong>一致性哈希天然不均匀，虚拟节点是必需品。</strong></li>
-    <li><strong>注入热点。</strong>把节点数设为 5，打开「注入热点 key」，分别观察取模与一致性哈希 → 两种模式的最热分片/平均都超过 2。<strong>分片解决容量，不解决热点；热点要靠第 5 章的击穿处方与打散。</strong></li>
+    <li><strong>注入热点。</strong>把节点数设为 5，打开「注入热点 key」，分别观察取模与一致性哈希 → 两种模式的两种模式的最热分片/平均都超过 2。<strong>这里的 2 与上文判据的 3 不冲突</strong>——5 节点、单 key 占 30% 流量时理论上限就是 2.2，已经明显不均，只是尚未到「宣布为热点」的 3 倍线；判据是告警阈值，实验测的是这组参数下的实际偏斜。<strong>分片解决容量，不解决热点；热点要靠第 5 章的击穿处方与打散。</strong></li>
   </ol>
 
   <h3>⚖️ 这个模型简化了什么</h3>

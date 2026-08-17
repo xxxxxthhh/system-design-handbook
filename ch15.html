@@ -72,29 +72,19 @@
 <p>这不是「等网络恢复后自动同步」能解决的问题。复制只能传递两个已经发生的事实，不能决定哪个事实有权覆盖另一个。你必须先让至少一边失去写资格，冲突集合才会停止增长。</p>
 
 <div class="decision" id="d1">
-  <span class="decision-tag">决策点 D1</span>
-  <h3>此刻是 14:08。你的第一个动作是什么？</h3>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">A</span>
-    立即恢复跨城复制，让两边互相同步并自动合并数据
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>立即恢复跨城复制，让两边互相同步并自动合并数据
   </button>
-  <button class="opt" data-d="1" data-k="good">
-    <span class="tag">B</span>
-    在入口与存储同时围栏写入，暂停杭州写；保全双边日志后确认固定成员集的多数派
+    <button class="opt" data-d="1" data-k="mid"><span class="tag">B</span>只把 DNS 全量指向上海，不修改杭州存储写权限
   </button>
-  <button class="opt" data-d="1" data-k="bad">
-    <span class="tag">C</span>
-    保持双写，按各地用户归属继续服务，等演练窗口结束再对账
+    <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>保持双写，按各地用户归属继续服务，等演练窗口结束再对账
   </button>
-  <button class="opt" data-d="1" data-k="mid">
-    <span class="tag">D</span>
-    只把 DNS 全量指向上海，不修改杭州存储写权限
+    <button class="opt" data-d="1" data-k="good"><span class="tag">D</span>在入口与存储同时围栏写入，暂停杭州写；保全双边日志后确认固定成员集的多数派
   </button>
-  <div class="verdict" id="v-d1">
-    <p><b class="good">B 是教科书答案：先恢复单一写入资格。</b>入口停止新请求，存储层再用 token 或只读开关拒绝旧主写入，防止绕过入口的消费者和补偿任务继续修改；保全两边日志后，按固定成员配置确认上海持有合法 3/5 多数派。</p>
-    <p><b class="bad">A 会把分叉变成覆盖冲突。</b>网络恢复只让差异相遇，不会产生业务仲裁规则。若复制按最后写入时间覆盖，时钟漂移还可能让较旧业务事实看起来更新。先围栏，再复制与合并。</p>
-    <p><b class="bad">C 会按每秒 160 个键扩大人工账单。</b>按地域接受订单只有在单元之间数据与库存互不重叠时才安全；本次两边共享同一场次和用户空间，继续双写就是继续出售同一份权利。</p>
-    <p><b class="mid">D 只围住了前门。</b>DNS 有缓存与传播延迟，杭州本地消费者、定时任务和内部调用仍能直写。流量切换应该配合存储 fencing；没有下游拒绝，旧主仍可能在网络恢复后补写。</p>
+    <div class="verdict" id="v-d1">
+    <p><b class="bad">A会把分叉变成覆盖冲突。</b>网络恢复只让差异相遇，不会产生业务仲裁规则。若复制按最后写入时间覆盖，时钟漂移还可能让较旧业务事实看起来更新。先围栏，再复制与合并。</p>
+    <p><b class="mid">B只围住了前门。</b>DNS 有缓存与传播延迟，杭州本地消费者、定时任务和内部调用仍能直写。流量切换应该配合存储 fencing；没有下游拒绝，旧主仍可能在网络恢复后补写。</p>
+    <p><b class="bad">C会按每秒 160 个键扩大人工账单。</b>按地域接受订单只有在单元之间数据与库存互不重叠时才安全；本次两边共享同一场次和用户空间，继续双写就是继续出售同一份权利。</p>
+    <p><b class="good">D是教科书答案：先恢复单一写入资格。</b>入口停止新请求，存储层再用 token 或只读开关拒绝旧主写入，防止绕过入口的消费者和补偿任务继续修改；保全两边日志后，按固定成员配置确认上海持有合法 3/5 多数派。</p>
   </div>
 </div>
 
@@ -468,7 +458,7 @@
   <div class="foot-in">
     <span><a href="ch14.html">← 第 14 章 · 可观测性——看懂凌晨三点的仪表盘</a></span>
     <span><a href="appendix-cards.html">病历卡 No.14 已收录于附录图鉴</a></span>
-    <span><a href="level4.html">实战关卡 4 · 脑裂与多活演练 →</a></span>
+    <span><a href="level4.html">实战关卡四 · GitHub 2018：四十三秒与二十四小时 →</a></span>
   </div>
 </footer>
 
