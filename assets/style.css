@@ -242,14 +242,15 @@ table.tbl td b{color:#AFC6FF}
   border-bottom:1px solid var(--line);padding-bottom:9px;margin:44px 0 4px}
 .toc-item{display:grid;grid-template-columns:58px 1fr;gap:14px;padding:15px 0;border-bottom:1px solid var(--line);
   text-decoration:none;color:var(--text)}
+.toc-item>*{min-width:0}
 .toc-item:hover{background:var(--panel-2)}
 .toc-item:focus-visible{outline:2px solid var(--teal);outline-offset:-2px;border-radius:6px}
 .toc-num{font-family:var(--mono);font-size:13px;color:var(--faint);padding-top:3px;letter-spacing:.06em}
 .toc-t{font-size:17px;font-weight:650;color:#F0F4FF;line-height:1.55}
 .toc-d{font-size:14.5px;color:var(--muted);margin-top:4px;line-height:1.7}
-.toc-tags{margin-top:7px;display:flex;gap:7px;flex-wrap:wrap}
+.toc-tags{margin-top:7px;display:flex;gap:7px;flex-wrap:wrap;align-items:flex-start}
 .tag-pill{font-family:var(--mono);font-size:11px;letter-spacing:.05em;padding:2px 8px;border-radius:99px;
-  border:1px solid var(--line);color:var(--faint)}
+  border:1px solid var(--line);color:var(--faint);white-space:nowrap;flex:none;line-height:1.7}
 .tag-pill.sim{border-color:#2E6B62;color:#9FE8DE}
 .tag-pill.card{border-color:#6B5A2E;color:var(--amber)}
 .toc-item.level{border-left:3px solid var(--red);padding-left:14px;grid-template-columns:44px 1fr}
