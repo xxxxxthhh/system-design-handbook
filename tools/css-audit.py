@@ -90,6 +90,30 @@ for c, where in sorted(used.items()):
     if c not in defined and c not in RUNTIME_CLASSES and c not in JS_HOOK_CLASSES:
         errs.append(f"class .{c} 被使用但 style.css 中无定义 → 会渲染成无样式元素（{sorted(where)[:3]}）")
 
+# 7 组件类同名碰撞
+#   同一元素上出现两个「各自作为独立选择器定义、且带布局属性」的类 → 它们会互相泄漏样式。
+#   真实案例：.tag-pill.sim —— BASE 的 .sim 是模拟器容器（margin:30px 0），
+#   撞名后把 30px 上下 margin 泄漏到 pill 上，第二个 pill 被压低整整一行。
+#   合法的「基类+修饰符」（.btn danger / .case-card no5）不会命中：
+#   修饰符只以 .base.mod 形式定义，本身不是独立组件类。
+LAYOUT_PROPS = ("margin", "padding", "background", "border-radius", "display", "position")
+standalone = {}
+for sel, body in re.findall(r"([^{}]+)\{([^}]*)\}", css_nc):
+    for part in sel.split(","):
+        part = part.strip()
+        m = re.fullmatch(r"\.([A-Za-z_][\w-]*)", part)
+        if m:
+            standalone.setdefault(m.group(1), "")
+            standalone[m.group(1)] += body
+for p_ in pages:
+    for attr in set(re.findall(r'class="([^"]+)"', p_.read_text(encoding="utf-8"))):
+        cls = attr.split()
+        heavy = [c for c in cls
+                 if c in standalone and any(k in standalone[c] for k in LAYOUT_PROPS)]
+        if len(heavy) > 1:
+            errs.append(f"{p_.name}: class=\"{attr}\" 同时含 {heavy} —— "
+                        f"它们都是独立定义且带布局属性的组件类，会互相泄漏样式（改名其中之一）")
+
 # 6 死 CSS（仅提示）
 unused = sorted(defined - set(used) - RUNTIME_CLASSES - JS_HOOK_CLASSES)
 if unused:
