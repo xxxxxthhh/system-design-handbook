@@ -4,6 +4,12 @@
 
 ## appendix-cards.html
 
+- appendix-cards.html → 第 16 章 → 从看见的证据反查可能的机理；每张卡还标了第 16 章总检用的机制轴——放大 / 
+- appendix-cards.html → 第 16 章 → —放大类 / 一致性类 / 单点类，那是第 16 章总检用的第二轴：形状回答“我
+- appendix-cards.html → 第 8 章 → PU 或慢查询显著高。算最热 ÷ 平均，第 8 章的判据是大于 3；再下钻到 k
+- appendix-cards.html → 第 16 章 → 了什么”，机制告诉你“该动哪一族处方”。第 16 章的收官总检把全书病历归成三种
+- appendix-cards.html → 第 16 章 → class="srcref">这三类在第 16 章各对应一种游戏日实验与一种“证
+- appendix-cards.html → 第 16 章 → <a href="ch16.html">第 16 章 · 3 病历卡总检 →</
 - appendix-cards.html → 第 2 章 → <a href="ch02.html">第 2 章 · 第一次宕机——连接池耗尽
 - appendix-cards.html → 第 5 章 → <a href="ch05.html">第 5 章 · 缓存三兄弟——穿透、击穿
 - appendix-cards.html → 第 7 章 → <a href="ch07.html">第 7 章 · 重试风暴与级联故障——好
@@ -124,6 +130,7 @@
 - appendix-interview.html → 第 16 章 → <a href="ch16.html">第 16 章 →</a></td></t
 - appendix-interview.html → 第 16 章 → ></td></tr> <tr><td>第 16 章</td><td>「容量规划
 - appendix-interview.html → 第 16 章 → <a href="ch16.html">第 16 章 →</a></td></t
+- appendix-interview.html → 第 16 章 → 16.html#four-weeks">第 16 章「接下来 4 周」</a>里
 
 ## ch01.html
 
@@ -327,7 +334,8 @@
 - index.html → 第 16 章 → class="hd">从第 1 章读到第 16 章。每一章的危机都由上一章的解法
 - index.html → 第 3 章 → 法埋下——<strong>缓存是为了解决第 3 章的读压力，而它在第 5 章杀了
 - index.html → 第 5 章 → 缓存是为了解决第 3 章的读压力，而它在第 5 章杀了你</strong>。顺读
-- index.html → 第 16 章 → <a href="ch16.html">第 16 章</a>末尾的 <stron
+- index.html → 第 16 章 → four-weeks"><strong>第 16 章末尾的「接下来 4 周」</
+- index.html → 第 16 章 → 是：<strong>顺读 16 章 → 第 16 章毕业飞行 → 接下来 4 周
 - index.html → 第 5 章 → >如果你只有一个下午：读<strong>第 5 章</strong>（缓存三兄弟
 - index.html → 第 12 章 → 把模拟器三个实验做完）和<strong>第 12 章</strong>（秒杀专章
 - index.html → 第 1 章 → div class="toc-num">第 1 章</div>   <div><

@@ -19,7 +19,7 @@
   <div class="chapter-head">
     <div class="eyebrow">附录 A · 急诊索引</div>
     <h1>病历卡图鉴<br>17 种故障的症状形状</h1>
-    <p class="h1-sub">事故现场通常不会先报出故障名称，它只留下一条曲线、一组分叉或一片过分安静的大盘。这里把全书病历按症状形状重新归组，让你从看见的证据反查可能的机理。</p>
+    <p class="h1-sub">事故现场通常不会先报出故障名称，它只留下一条曲线、一组分叉或一片过分安静的大盘。这里把全书病历按症状形状重新归组，让你从看见的证据反查可能的机理；每张卡还标了第 16 章总检用的机制轴——放大 / 一致性 / 单点，作为第二条查找路径。</p>
   </div>
 </header>
 
@@ -27,37 +27,63 @@
 
 <h2>怎么用这本图鉴</h2>
 
-<p class="lead">值班时，先按你在大盘上看到的<strong>形状</strong>找到下面六组，再在组内逐条核对症状文字。形状负责缩小搜索面，机理、易发场景与上下游证据负责确认诊断；不要只凭一根曲线直接开药。</p>
+<p class="lead">值班时，先按你在大盘上看到的<strong>形状</strong>找到下面六组，再在组内逐条核对症状文字。形状负责缩小搜索面，机理、易发场景与上下游证据负责确认诊断；不要只凭一根曲线直接开药。每张卡末尾还有一行<strong>机制轴</strong>标签——放大类 / 一致性类 / 单点类，那是第 16 章总检用的第二轴：形状回答“我看见了什么”，机制回答“该动哪一族处方、游戏日先打哪一类”。</p>
 
 <div class="kicker">同一个故障可能投下多种影子，同一种形状也可能来自不同机理。先用形状索引，再用业务账、调用链和时间线交叉验证。</div>
 
 <h2>同形状怎么排除——鉴别诊断表</h2>
-<p class="lead">形状只负责把嫌疑范围缩小到几个候选，不负责宣判。下表给三组最容易混淆的形状各自的候选诊断，每个候选配<strong>一条可执行的下一步证据</strong>——去看哪张监控、查哪张表，而不是凭经验直接开药。本表不新增病历卡编号，只把已有的卡重新按「怎么排除」排一遍。</p>
+<p class="lead">形状只负责把嫌疑范围缩小到几个候选，不负责宣判。下表按<strong>你正在看的是哪块面板</strong>分组：同一组里的候选必须能在同一块面板上长成同一个样子，否则谈不上鉴别——一根时间轴上的尖刺、一张按分片切开的直方图、一笔对不平的业务账，是三块不同的面板，不能混在一组。每个候选配一条下一步证据，写清<strong>本卡该看到什么、看到别的该转向谁</strong>：证据若排除不了同组里至少一个候选，就还不算证据。本表不新增病历卡编号，只把已有的卡按「怎么排除」重排一遍。</p>
 
 <div class="tbl-wrap">
 <table class="tbl">
 <thead>
-<tr><th>形状</th><th>候选诊断</th><th>下一步证据（去看哪个指标/哪张表）</th></tr>
+<tr><th>你在看的面板</th><th>候选诊断</th><th>下一步证据 · 本卡该看到什么 → 否则转向谁</th></tr>
 </thead>
 <tbody>
-<tr><td rowspan="2">平坦/无症状</td><td>业务结果错了，基础设施指标却全绿（双写不一致 No.03 / 消息丢失重复 No.12）</td><td>抽样跑一次业务对账：比较同一订单/key 在 DB、缓存、下游系统里的最新版本号，看差异笔数是否非零。</td></tr>
-<tr><td>只是「聚合」看起来平坦，局部分区/版本已经在报错（灰色故障 No.15）</td><td>把错误率按分片、可用区、版本或租户切片，看是否有子集显著偏离整体均值。</td></tr>
-<tr><td rowspan="3">单点尖刺</td><td>同一个热点 key 的缓存击穿（No.05）</td><td>查尖刺窗口内的慢查询日志，看是否集中在同一条 SQL、同一个 key。</td></tr>
-<tr><td>同一个分片被打热（No.10 热点分片）</td><td>按分片看 QPS 分布，算最热/平均比值，是否显著大于 1。</td></tr>
-<tr><td>锁租期到期后的并发持有窗口（No.13 分布式锁失效）</td><td>查锁服务日志，看尖刺前后该 key 是否发生过续租失败或 TTL 到期。</td></tr>
-<tr><td rowspan="3">单调爬升</td><td>真实新流量涌入，容量确实不够了</td><td>看入口 QPS/DAU 曲线是否与末端指标同步、同比例上涨。</td></tr>
-<tr><td>重试放大（No.07 重试风暴）</td><td>对比入口 QPS 与末端 QPS：入口平稳而末端持续爬升，就去查重试计数和待发请求数。</td></tr>
-<tr><td>消费速率长期低于生产速率（No.11 消息积压）</td><td>看 backlog 与 oldest-message-age 是否同向上涨，比较生产/消费两条曲线的差值。</td></tr>
+<tr><td rowspan="3"><b>大盘平坦</b><br>聚合 RED 与基础设施曲线全绿，业务侧却有工单或账差</td><td>只是「聚合」看起来平坦，局部子集在报错（No.15 灰色故障）</td><td>把错误率与延迟按实例、分区、可用区、版本、租户切片。本卡：某个子集显著偏离、其余正常，而且这些请求确实<strong>失败</strong>了。若切片后各子集都干净、请求全部成功只是结果不对 → 不是 No.15，转去做下面两行的对账。</td></tr>
+<tr><td>同一实体两处存储的值不同（No.03 双写不一致）</td><td>抽样同一 key，比较缓存里的值与 DB 里的版本号/更新时间。本卡：<strong>同一实体在两处的值不同</strong>，差异出现在最近一次写之后，且每一处内部自洽。若缓存与 DB 一致、业务台账却缺一条或多一条 → 转向 No.12。</td></tr>
+<tr><td>同一事件被处理了 0 次或 ≥2 次（No.12 消息丢失与重复）</td><td>用同一幂等键/消息 id 做三方对账：发送记录、broker 投递记录、消费结果。本卡：<strong>处理次数 ≠ 1</strong>（0 次是丢失，≥2 次是重复），而单条存储内部值是自洽的。若三方次数都是 1、只是缓存与 DB 值不同 → 转向 No.03。</td></tr>
+<tr><td rowspan="4"><b>时间轴尖刺</b><br>末端 QPS 或错误率的时间曲线，尖起又回落</td><td>真实入口尖峰：开售、推送、热搜</td><td>把入口 QPS 与尖刺时刻叠在同一条时间轴上。本卡：入口与末端<strong>同一时刻、同一比例</strong>尖起。若入口曲线平稳、只有末端尖起 → 放大发生在系统内部，转向 No.05 / No.08。</td></tr>
+<tr><td>一个热点 key 过期后的并发回源（No.05 缓存击穿）</td><td>查尖刺窗口内的慢查询/回源日志。本卡：请求集中在<strong>同一个 key</strong>，该 key 的 miss 计数在同一秒跳升并与它的 TTL 到期对齐，尖刺前后这个 key 落到 DB 的量接近 0。若同一 key 在尖刺之外也持续高频落 DB → 那是持续热点，不是击穿，转向 No.10 的下钻；若落到 DB 的是大量不同的、查不到结果的 key → 转向 No.04；若尖刺里是很多不同 key、来自同一批客户端 → 转向 No.08。</td></tr>
+<tr><td>一批等待者同刻醒来（No.08 惊群效应）</td><td>看尖刺是否以固定周期重复，周期是否等于统一超时、固定 backoff 或定时任务间隔。本卡：<strong>周期性</strong>，每次尖刺内请求分散在很多 key、但发起时间挤在同一毫秒级窗口。若只出现一次、且集中在一个 key → 转向 No.05。</td></tr>
+<tr><td>写后立刻读到旧值的毛刺（No.02 主从复制延迟）</td><td>把错误率毛刺与复制延迟曲线、批量写入时刻叠在一起。本卡：报错的都是<strong>刚写完立刻读、且打到副本</strong>的请求，DB 上没有并发回源的尖刺，副本追平后自愈。若毛刺伴随 DB QPS 尖起、报错的不限于刚写过的 key → 转向 No.05。</td></tr>
+<tr><td rowspan="3"><b>单调爬升</b><br>末端负载或队列长度的时间曲线只升不落</td><td>真实新流量涌入，容量确实不够了</td><td>看入口 QPS/DAU 是否与末端指标同步、同比例上涨。本卡：入口先涨、末端跟涨。若入口平稳、只有末端在涨 → 多出来的负载是系统自己造的，转向 No.07 / No.11。</td></tr>
+<tr><td>重试放大（No.07 重试风暴）</td><td>把入口 QPS、末端 QPS 与重试计数放在同一条时间轴。本卡：入口平稳，<strong>末端 QPS 与重试计数同步爬升</strong>。若末端处理速率已贴顶不动、涨的只是排队长度 → 转向 No.11。</td></tr>
+<tr><td>消费速率长期低于生产速率（No.11 消息积压）</td><td>看 backlog 与 oldest-message-age 是否同向上涨、消费曲线是否长期压在生产曲线之下。本卡：末端消费速率是<strong>平的</strong>（已到上限），涨的是欠债；暂停生产后 backlog 以消费速率线性下降。若末端速率本身还在往上爬 → 转向 No.07。</td></tr>
+<tr><td rowspan="2"><b>切片不对称</b><br>按分片 / 可用区 / 实例切开的直方图，一根柱子偏离其余——不是时间轴</td><td>一片被打热（No.10 热点分片）</td><td>偏离的维度是<strong>负载</strong>：单片 QPS、CPU 或慢查询显著高。算最热 ÷ 平均，第 8 章的判据是大于 3；再下钻到 key，看是否少数 key 或某个场次贡献了大头。若最热 ÷ 平均在 3 以内、或偏离的不是负载而是错误率 → 转向 No.15。</td></tr>
+<tr><td>一片坏了但负载正常（No.15 灰色故障）</td><td>偏离的维度是<strong>错误率或延迟</strong>，而该子集的负载与其他子集持平甚至更低；把它摘流后用户报错立即消失。若摘流后热度只是转移到另一片 → 转向 No.10。</td></tr>
+<tr><td rowspan="4"><b>并发写者</b><br>业务台账：同一订单被扣两次、库存为负、同一键两条互相矛盾的记录；大盘往往平静</td><td>两个进程同时进入临界区（No.13 分布式锁失效）</td><td>查锁服务日志与临界区日志。本卡：<strong>两个 owner 的持有区间重叠</strong>（后者 acquire 早于前者 release），或旧 fencing token 在新 token 之后仍写入成功。只看到 TTL 到期或续租失败不算——那只是嫌疑，没有重叠 owner 就排除不了 No.12。若临界区里始终只有一个 owner、重复来自同一条消息被投递两次 → 转向 No.12。</td></tr>
+<tr><td>同一条消息被投递两次（No.12 消息重复）</td><td>查 broker 的重投计数与消费者 ack 超时日志。本卡：<strong>同一 message-id 被投递 ≥2 次</strong>，两次执行是同一条消息，中间隔着一次消费超时或重启。若两次执行来自两条不同请求、同时进入临界区 → 转向 No.13。</td></tr>
+<tr><td>时间戳裁决出了错误顺序（No.17 时钟漂移）</td><td>把冲突两条记录的写入时间戳与业务因果顺序对比，并看节点时钟偏差监控。本卡：<strong>时间戳顺序与因果顺序矛盾</strong>（取消带着比支付更早的时间），偏差超过租约或合并规则的安全裕量。若时间戳顺序自洽、只是执行了两次 → 转向 No.12 / No.13。</td></tr>
+<tr><td>两地各自当主（No.14 脑裂）</td><td>看两地在同一时段是否都有写入成功日志。本卡：<strong>同一业务键出现两条互不继承的版本线</strong>，各自在自己的机房成功，复制恢复时冲突集中暴露。若只有一个机房在写、冲突发生在单集群内 → 转向 No.13。</td></tr>
 </tbody>
 </table>
 </div>
+
+<h2 id="mech">第二轴：按机制归组</h2>
+<p class="lead">形状告诉你“看见了什么”，机制告诉你“该动哪一族处方”。第 16 章的收官总检把全书病历归成三种体质，这里把它接到图鉴上：每张卡末尾的「机制轴」一行标着它属于哪一类，本表是反向索引——从体质出发，找到同类的全部卡。同一张卡只在下面六个形状组里出现一次，这里只放指针。</p>
+
+<div class="tbl-wrap">
+<table class="tbl">
+<thead>
+<tr><th>体质</th><th>共同机理</th><th>处方族</th><th>卡片</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>放大类</strong></td><td>小触发在系统内部长成比自身大得多的负载：并发回源、逐层重试、同步唤醒、沿依赖传播、按时间累积欠债、触发消失后仍自我供能。</td><td>切断放大边：互斥回源、单一重试责任层与预算、jitter、舱壁与熔断、入口限流与慢放量。</td><td><a href="#no04">No.04&nbsp;缓存穿透</a> · <a href="#no05">No.05&nbsp;缓存击穿</a> · <a href="#no06">No.06&nbsp;缓存雪崩</a> · <a href="#no07">No.07&nbsp;重试风暴</a> · <a href="#no08">No.08&nbsp;惊群效应</a> · <a href="#no09">No.09&nbsp;级联故障</a> · <a href="#no11">No.11&nbsp;消息积压</a> · <a href="#no16">No.16&nbsp;亚稳态故障</a></td></tr>
+<tr><td><strong>一致性类</strong></td><td>同一份事实在时间或故障中被复制成两个版本：主与从、缓存与 DB、生产与消费、两个持有者、两个主、两只时钟。</td><td>让真相可仲裁：写后读主与确认中语义、补偿与对账、幂等键与死信、fencing token 与持有者校验、多数派与单调版本。</td><td><a href="#no02">No.02&nbsp;主从复制延迟</a> · <a href="#no03">No.03&nbsp;缓存与 DB 双写不一致</a> · <a href="#no12">No.12&nbsp;消息丢失与重复</a> · <a href="#no13">No.13&nbsp;分布式锁失效</a> · <a href="#no14">No.14&nbsp;脑裂</a> · <a href="#no17">No.17&nbsp;时钟漂移</a></td></tr>
+<tr><td><strong>单点类</strong></td><td>一处共享闸门或一个被钉住的子集先耗尽，其余节点的余量无法接力；灰色故障是它的局部型——坏的不是负载，是被路由钉住的那个子集。</td><td>打散与隔离：限并发与获取超时、按下游容量定池、热点隔离与二次打散、按切片观测并摘流。</td><td><a href="#no01">No.01&nbsp;连接池耗尽</a> · <a href="#no10">No.10&nbsp;热点分片</a> · <a href="#no15">No.15&nbsp;灰色故障</a></td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="srcref">这三类在第 16 章各对应一种游戏日实验与一种“证明没留后遗症”的方式：<a href="ch16.html">第 16 章 · 3 病历卡总检 →</a></p>
 
 <!-- ================= 断崖·阶跃型 ================= -->
 <section class="grp">
   <div class="grp-h">01 · 断崖·阶跃型</div>
   <p class="grp-d">指标垂直跳变，一眼可见：资源突然贴顶、保护层突然失效，或调用链从局部异常快速塌成全局不可用。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no01">
     <div class="case-head">
       <h3>连接池耗尽</h3>
       <span class="case-no">病历卡 No.01</span>
@@ -84,11 +110,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」第 2 个月被本地媒体报道，入口从约 72 QPS 涨到 486 QPS。50 个连接槽打满、等待者升到 1,842，全站 502 达 61.8%；入口限并发后，DB 无需重启便恢复周转。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>单点类</strong> · 有限连接槽是全部请求的共同闸门：应用实例再多，也只是在同一道门前排更长的队。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch02.html">第 2 章 · 第一次宕机——连接池耗尽之夜</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no06">
     <div class="case-head">
       <h3>缓存雪崩</h3>
       <span class="case-no">病历卡 No.06</span>
@@ -115,11 +145,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」02:47 完成 Redis 集群滚动升级后，命中率从平时 98% 跌到 2.1%，DB 查询升到 31,400 QPS，订单线程池排队 2.3 万；团队先限流，再预热头部 key 并逐级放量。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 大片 key 同刻失效，本该被缓存吸收的总读量整体转嫁给 DB，冷缓存与过载 DB 还可能互相锁死。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch05.html">第 5 章 · 缓存三兄弟——穿透、击穿、雪崩</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no09">
     <div class="case-head">
       <h3>级联故障</h3>
       <span class="case-no">病历卡 No.09</span>
@@ -146,6 +180,10 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」支付渠道只是变慢，支付、订单、网关却依次耗尽工作线程；用户资料等无关接口也因共享池排队。没有组件宕机，平台仍在五分钟内从局部慢退化为全站超时。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 共享线程池与连接池把一处变慢传播成整条调用链的等待，扩散半径随依赖深度增长。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch07.html">第 7 章 · 重试风暴与级联故障——好心办坏事</a></p>
   </div>
@@ -156,7 +194,7 @@
   <div class="grp-h">02 · 尖刺型</div>
   <p class="grp-d">瞬时脉冲，回落快：故障证据只在短窗口里出现，必须把尖刺与 TTL、写高峰、重试周期、进程停顿或故障切换对齐。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no05">
     <div class="case-head">
       <h3>缓存击穿</h3>
       <span class="case-no">病历卡 No.05</span>
@@ -183,11 +221,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」顶流场次详情 key 在开票高峰到期，同一时刻的大量 miss 集中查询一条 SQL，DB QPS 垂直冒出一根尖刺；加入 singleflight 后，每个实例只保留一个回源执行者。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 一个 key 的一次过期，被并发请求放大成同一瞬间的 N 次回源。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch05.html">第 5 章 · 缓存三兄弟——穿透、击穿、雪崩</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no08">
     <div class="case-head">
       <h3>惊群效应</h3>
       <span class="case-no">病历卡 No.08</span>
@@ -214,11 +256,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」第一版客户端统一等待 1 秒再试，渠道 QPS 每秒冒出一根尖刺；加入指数 backoff 后尖峰摊开，再加入 ±50% jitter，客户端不再在同一个刻度集体醒来。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 同步唤醒把分散在时间轴上的请求压进同一毫秒：平均负载没变，峰值成倍。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch07.html">第 7 章 · 重试风暴与级联故障——好心办坏事</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no02">
     <div class="case-head">
       <h3>主从复制延迟</h3>
       <span class="case-no">病历卡 No.02</span>
@@ -245,11 +291,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」本次开票中，主库提交成功率 99.98%，副本延迟从约 35ms 毛刺到 2.8s；刚支付的详情查询有 18.4% 返回未命中。强制写后读主并暂停大事务后，错误率随复制位点追平而回落。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 主库与副本是同一份事实的两个版本，延迟窗口内“已提交”与“可读到”分叉。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch03.html">第 3 章 · 读写分离——以及复制延迟挖的坑</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no13">
     <div class="case-head">
       <h3>分布式锁失效</h3>
       <span class="case-no">病历卡 No.13</span>
@@ -276,6 +326,10 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」一次票权归还任务耗时从平时 400ms 抖到 6s，3s 锁已过期；第二个实例接手后，旧实例恢复并无条件删除新锁，第三个实例也进入临界区，最终同一张票被重复释放。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 租期与持有者身份脱节，两个进程各自相信自己独占同一段临界区。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch11.html">第 11 章 · 幂等与分布式锁——用户狂点了八次购买</a></p>
   </div>
@@ -286,7 +340,7 @@
   <div class="grp-h">03 · 爬升不回落型</div>
   <p class="grp-d">单调恶化，不自愈：先找到让斜率持续为正的反馈环或净流入，再谈扩容、重启和恢复时间。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no07">
     <div class="case-head">
       <h3>重试风暴</h3>
       <span class="case-no">病历卡 No.07</span>
@@ -313,11 +367,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」入口支付约 2,010 QPS，三层各尝试 3 次后，渠道端出现约 54,200 QPS；待发重试升到 18.6 万，原始流量没变，系统却被自己产生的尝试压满。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 每一层重试都把上游的一次失败变成下游的多次尝试，层数是指数的底。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch07.html">第 7 章 · 重试风暴与级联故障——好心办坏事</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no11">
     <div class="case-head">
       <h3>消息积压</h3>
       <span class="case-no">病历卡 No.11</span>
@@ -344,11 +402,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」本次事故中，画像补算把消费吞吐压到 7,000/s，而生产维持 12,000/s；队列以 5,000/s 的净速率增长，积压达到 482 万条，最老消息等待超过 11 分钟。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 生产快于消费的差额按时间累积成欠债，一段小差额变成恢复期要一次偿还的大笔负载。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch09.html">第 9 章 · 消息队列——削峰填谷</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no16">
     <div class="case-head">
       <h3>亚稳态故障</h3>
       <span class="case-no">病历卡 No.16</span>
@@ -375,6 +437,10 @@
         <div class="lbl">案例</div>
         <div class="val">Facebook 在 2010 年的一次著名故障中，因配置校验逻辑的错误，所有客户端将缓存值判为无效并同时涌向数据库集群，最终不得不整站下线才恢复，全程约两个半小时（官方复盘公开）。<span class="srcref">官方来源：<a href="https://engineering.fb.com/2010/09/23/uncategorized/more-details-on-today-s-outage/">Facebook Engineering · More Details on Today's Outage</a></span></div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 触发撤走后，超时、重试与冷缓存组成的反馈环继续自我供能，负载已经不再需要外部原因。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：附录新增 · 互链 <a href="ch05.html">第 5 章死亡螺旋</a> / <a href="ch07.html">第 7 章重试风暴</a></p>
   </div>
@@ -385,7 +451,7 @@
   <div class="grp-h">04 · 渗血·慢性型</div>
   <p class="grp-d">缓慢劣化，容易被忽视：日常大盘可能只比昨天差一点，直到一次流量上升把长期累积的余量吃完。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no04">
     <div class="case-head">
       <h3>缓存穿透</h3>
       <span class="case-no">病历卡 No.04</span>
@@ -412,6 +478,10 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」上线三个月时遭遇过爬虫逐号枚举订单接口：命中率一周内从 98% 阴跌到 91%，没人在意——直到一次促销把 DB 推过了临界点。穿透的可怕在于它平时只是慢性病。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>放大类</strong> · 缓存对无效 key 失去衰减作用，这部分请求以 100% 比例落到 DB——放大的不是倍数，是被绕过的那一层保护。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch05.html">第 5 章 · 缓存三兄弟——穿透、击穿、雪崩</a></p>
   </div>
@@ -422,7 +492,7 @@
   <div class="grp-h">05 · 无症状型</div>
   <p class="grp-d">监控看不见，只有工单或对账能发现：基础设施曲线平稳，不代表业务结果正确；这组故障要靠主动比对制造可观测证据。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no03">
     <div class="case-head">
       <h3>缓存与 DB 双写不一致</h3>
       <span class="case-no">病历卡 No.03</span>
@@ -449,11 +519,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」运营将场次价格从 ¥580 改为 ¥680，后台写 DB 成功却漏删缓存；热点 key 以 5,000 QPS 持续命中旧值，监控全绿，直到 327 张客服工单把双写裂缝照出来。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 缓存与 DB 各持一份值，第二步失败后两份真相各自成立、互不知情。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch04.html">第 4 章 · 上缓存——以及你签下的一致性契约</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no12">
     <div class="case-head">
       <h3>消息丢失与重复</h3>
       <span class="case-no">病历卡 No.12</span>
@@ -480,11 +554,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」曾在消费者滚动发布时出现确认回包丢失：队列再次投递了已完成的出票消息。队列大盘全绿，直到订单与票权日终对账出现重复记录，团队才发现防重只存在进程内存里。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 发送方记录、broker 与消费者对“这条消息处理了几次”各有一份答案。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch09.html">第 9 章 · 消息队列——削峰填谷</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no15">
     <div class="case-head">
       <h3>灰色故障</h3>
       <span class="case-no">病历卡 No.15</span>
@@ -511,6 +589,10 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」订单集群探活持续全绿，聚合错误率也低于告警线，但使用某个场次分区的用户稳定收到失败；团队按分区切片后定位异常副本，将它摘流并回滚。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>单点类</strong> · 局部型：坏掉的是被路由钉住的一个子集——某批实例、某个分区或某条路径；健康节点的余量帮不上被钉在坏子集上的用户，探活又把它摊薄。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：附录新增 · 互链 <a href="ch13.html">第 13 章微服务拆分</a> / <a href="ch14.html">第 14 章可观测性</a></p>
   </div>
@@ -521,7 +603,7 @@
   <div class="grp-h">06 · 分叉·不对称型</div>
   <p class="grp-d">不是变差，是变得不一致：集群平均值可能健康，真正的证据藏在分片差、双线版本或互相矛盾的时间轴里。</p>
 
-  <div class="case-card">
+  <div class="case-card" id="no10">
     <div class="case-head">
       <h3>热点分片</h3>
       <span class="case-no">病历卡 No.10</span>
@@ -548,11 +630,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」8 个订单分片总计 80,000 QPS，顶流 show_id=8842 占 62%，shard-03 独自承接 49,600 QPS；最热/平均达 4.96，其余七片仍有余量。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>单点类</strong> · 分片键把最热的 key 钉在一台机器上，其余分片的余量无法替它服务。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch08.html">第 8 章 · 分库分表——以及热点分片</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no14">
     <div class="case-head">
       <h3>脑裂</h3>
       <span class="case-no">病历卡 No.14</span>
@@ -579,11 +665,15 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」容灾演练误触发两套本地提升逻辑，上海与杭州同时写入共享订单空间；冲突键以约 160/s 增长。团队围栏杭州写入、保全双边日志，并按合法多数派与业务账本逐笔收敛。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 两个多数派各自接受写入，同一业务键长出两条互不继承的版本线。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：<a href="ch15.html">第 15 章 · 异地多活——以及脑裂</a></p>
   </div>
 
-  <div class="case-card">
+  <div class="case-card" id="no17">
     <div class="case-head">
       <h3>时钟漂移</h3>
       <span class="case-no">病历卡 No.17</span>
@@ -610,6 +700,10 @@
         <div class="lbl">案例</div>
         <div class="val">「秒抢」两地恢复复制后，同一订单的取消事件晚到却带着更早时间，按 last-write-wins 合并会保留已失效的支付状态；团队改用单调业务版本与状态机规则仲裁。</div>
       </div>
+      <div class="case-row">
+        <div class="lbl">机制轴</div>
+        <div class="val"><strong>一致性类</strong> · 每个节点各持一份“现在几点”，用墙上时间裁决先后，等于让多份真相互相仲裁。<span class="srcref"><a href="#mech">机制轴索引 ↑</a></span></div>
+      </div>
     </div>
     <p class="srcref">展开章节：附录新增 · 互链 <a href="ch15.html">第 15 章异地多活与脑裂</a></p>
   </div>
@@ -620,7 +714,7 @@
 <footer>
   <div class="foot-in">
     <span><a href="ch16.html">← 第 16 章 · 混沌工程与容量规划——主动把系统弄坏</a></span>
-    <span>17 张病历卡 · 按症状形状分为 6 组</span>
+    <span>17 张病历卡 · 按症状形状分为 6 组 · 按机制分为 3 类</span>
     <span><a href="appendix-interview.html">附录 B · 面试映射总表 →</a></span>
   </div>
 </footer>

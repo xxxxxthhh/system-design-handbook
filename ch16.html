@@ -82,13 +82,13 @@
     <p><b class="bad">A的问题是跨过了太多未知。</b>
       机房级切换同时触碰流量调度、数据一致性、容量与网络，第一次生产实验很难判断失败来自哪一层。爆炸半径也远大于本次要验证的缓存回源护栏。
     </p>
-    <p><b class="bad">B会让事情更糟。</b>
+    <p><b class="bad">B方向反了——它放大的正是你想压住的东西。</b>
       全集群同时变慢会把回源洪峰直接交给数据库；“人工观察后再回滚”把停止时间交给会议延迟。实验若没有机器可执行的回滚条件，就在用用户等待换团队反应时间。
     </p>
     <p><b class="mid">C方向没错，但证据不完整。</b>
       预发适合验证注入工具、指标和回滚脚本，却缺少生产流量形状、真实依赖配额与实际网络。它是生产实验的前置门槛，不能替代受控生产证据。
     </p>
-    <p><b class="good">D是教科书答案：用最小爆炸半径验证完整闭环。</b>
+    <p><b class="good">D该先做的就是它：用最小爆炸半径验证完整闭环。</b>
       一台缓存节点足以触发回源、限流、告警与回滚路径；单元边界和 1% 流量限制影响范围，机器执行停止条件又避免人工迟疑。实验有明确学习目标，也有明确刹车线。
     </p>
   </div>
@@ -183,82 +183,42 @@
 <!-- ================= 病历卡 ================= -->
 <h2><span class="sec">16 · 3 病历卡</span>十四张病历，三类系统性体质</h2>
 
-<p>本章不新增病历卡。收官总检把 No.01–14 各放入一个主类别：放大类关注“一个小触发怎样制造更多负载”，一致性类关注“多份真相怎样分叉”，单点类关注“共享瓶颈怎样让集群余量失效”。分类不是说卡片只有一种属性，而是为了决定先打哪种实验。</p>
+<p>本章不新增病历卡。收官总检要回答的不是“每张卡叫什么”，而是“游戏日先打哪一类”。No.01–14 各放入一个主类别：放大类关注“一个小触发怎样制造更多负载”，一致性类关注“多份真相怎样分叉”，单点类关注“共享瓶颈怎样让集群余量失效”。分类不是说卡片只有一种属性，而是为了决定先做哪种实验、稳态盯哪条曲线、事后怎样证明没留后遗症。</p>
 
-<h3>放大类 · 小触发产生更大的内部负载</h3>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.04</span><span class="nm">缓存穿透</span><span class="sym">▁▂▂▃▃▄▄</span>
-  无效 key 绕过缓存持续打 DB；游戏日注入非法 key 洪峰，验证过滤器、空值缓存与入口限速。<a href="appendix-cards.html">附录图鉴 →</a>
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>体质 · 卡片</th>
+        <th>共同机理</th>
+        <th>先打的实验 · 稳态看什么 · 怎样证明没留后遗症</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>放大类</strong><br><a href="appendix-cards.html#no04">No.04</a> <a href="appendix-cards.html#no05">05</a> <a href="appendix-cards.html#no06">06</a> <a href="appendix-cards.html#no07">07</a> <a href="appendix-cards.html#no08">08</a> <a href="appendix-cards.html#no09">09</a> <a href="appendix-cards.html#no11">11</a></td>
+        <td>小触发在系统内部长成比自身大得多的负载：并发回源、逐层重试、同步唤醒、沿依赖传播、按时间累积欠债。</td>
+        <td>注入一个<strong>小而可回收</strong>的触发——一次热点过期、一次下游超时、拖慢一个依赖、停一个消费者。稳态看<strong>内部负载 ÷ 入口负载</strong>有没有被放大，触发撤掉后曲线是否自己回落；回不落的就是死亡螺旋，靠限流与慢放量收场。后遗症看曲线是否回到稳态。</td>
+      </tr>
+      <tr>
+        <td><strong>一致性类</strong><br><a href="appendix-cards.html#no02">No.02</a> <a href="appendix-cards.html#no03">03</a> <a href="appendix-cards.html#no12">12</a> <a href="appendix-cards.html#no13">13</a> <a href="appendix-cards.html#no14">14</a></td>
+        <td>同一份事实在时间或故障中被复制成两个版本：主与从、缓存与 DB、生产与消费、两个持有者、两个主。</td>
+        <td>故意让第二步失败或延迟——丢一次缓存失效、拉长复制延迟、重投一条消息、让临界区超过租期、隔离两地链路。稳态看<strong>对账差异笔数</strong>与<strong>并发写者数</strong>，性能大盘可能全绿，证据只在业务账上。后遗症看账能否对平，不看进程是否重启成功。</td>
+      </tr>
+      <tr>
+        <td><strong>单点类</strong><br><a href="appendix-cards.html#no01">No.01</a> <a href="appendix-cards.html#no10">10</a></td>
+        <td>一处共享闸门或一个被钉住的子集先耗尽，其余节点的余量无法接力。</td>
+        <td>把一处打热或拖慢——注入慢查询、注入热点 key。稳态看<strong>最热 ÷ 平均</strong>与总容量余量的背离：集群平均健康、局部已经打满，就是单点。后遗症看把那一处摘掉或打散后，其余容量能否接住。</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 
-<div class="case-ref">
-  <span class="no">病历卡 No.05</span><span class="nm">缓存击穿</span><span class="sym">▁▁▁█▁▁▁</span>
-  一个热点 key 失效放大成并发回源；注入热点过期，验证互斥回源只放一个请求。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
+<p>三类体质，三种爆炸半径。放大类的实验最容易越界，因为放大本身就是它的机理，先在预发验证“回落”是否成立；一致性类的实验对业务账动手，必须先备好对账脚本与补偿路径；单点类的实验半径最小，也最适合作为第一次生产游戏日的开场。</p>
 
-<div class="case-ref">
-  <span class="no">病历卡 No.06</span><span class="nm">缓存雪崩</span><span class="sym">███▁▁▁▁</span>
-  大片 key 同时失效把总读量交给 DB；下线缓存节点，验证限流、预热与慢放量。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.07</span><span class="nm">重试风暴</span><span class="sym">▁▂▄█████</span>
-  下游失败产生更多内部尝试；注入支付超时，验证单一重试责任层、预算与熔断。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.08</span><span class="nm">惊群效应</span><span class="sym">▁▁█▁▁█▁</span>
-  等待者在同一刻醒来形成周期尖峰；让一批客户端同时退避，验证 jitter 能否拆散同步。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.09</span><span class="nm">级联故障</span><span class="sym">███▇▅▃▁</span>
-  局部变慢借共享资源向上游传播；拖慢一个依赖，验证舱壁让无关接口保持稳态。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.11</span><span class="nm">消息积压</span><span class="sym">▁▂▃▄▅▆▇</span>
-  生产持续快于消费，欠债单调增长；停一个消费者，验证上游减量与追平时间告警。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<h3>一致性类 · 多份状态在时间与故障中分叉</h3>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.02</span><span class="nm">主从复制延迟</span><span class="sym">▁▁▃▁▁█▁</span>
-  主库已提交、副本仍旧；注入复制延迟，验证写后读主、确认中语义与延迟告警。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.03</span><span class="nm">缓存与 DB 双写不一致</span><span class="sym">▁▁▁▁▁</span>
-  两个系统在第二步失败时分叉；故意丢一次缓存失效，验证补偿重试与版本对账。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.12</span><span class="nm">消息丢失与重复</span><span class="sym">▁▁▁▁▁</span>
-  异步链路无性能症状却产生账实差异；注入重复与丢失，验证幂等、死信和对账。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.13</span><span class="nm">分布式锁失效</span><span class="sym">▁▁█▁▁</span>
-  租期、owner 或切换让互斥承诺失效；延长临界区超过租期，验证原子约束与持有者校验。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.14</span><span class="nm">脑裂</span><span class="sym">██‖██</span>
-  两边同时接受写入，产生并行真相；隔离链路时验证多数派、fencing 与 RPO 边界。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<h3>单点类 · 一处共享瓶颈让其余容量无法帮忙</h3>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.01</span><span class="nm">连接池耗尽</span><span class="sym">▁▂▅███</span>
-  有限连接池成为全部请求的共同闸门；注入慢查询，验证并发上限、获取超时和入口减量。<a href="appendix-cards.html">附录图鉴 →</a>
-</div>
-
-<div class="case-ref">
-  <span class="no">病历卡 No.10</span><span class="nm">热点分片</span><span class="sym">▁▁▁█▁▁</span>
-  一个分片独自过载，其他节点余量无法接力；注入热点 key，验证独立通道与二次打散。<a href="appendix-cards.html">附录图鉴 →</a>
+<div class="case-ref fwd">
+  <span class="no">附录 A</span><span class="nm">机制轴索引</span>
+  逐张的机理、症状形状与处方不在这里重抄。附录图鉴给 17 张卡（含附录新增的 No.15–17）都标了这套体质标签，作为形状之外的第二轴，并配了同形状候选的鉴别诊断表。<a href="appendix-cards.html#mech">附录图鉴 · 机制轴索引 →</a>
 </div>
 
 <p>总检完成后，每张卡都应对应一个可执行实验：输入是什么、稳态看什么、爆炸半径多大、何时回滚、如何证明数据没有留下后遗症。附录图鉴是索引，游戏日计划才是处方。</p>
@@ -604,7 +564,7 @@
   </div>
 </div>
 
-<h3>接下来 4 周：把「秒抢」的方法搬回你自己的系统</h3>
+<h3 id="four-weeks">接下来 4 周：把「秒抢」的方法搬回你自己的系统</h3>
 
 <p>合上书不等于练完。下面这条路径没有唯一顺序，但有一个默认节奏：先体检，再写预案，再拿真实故障验证预案，最后用计时面试逼自己在压力下把这套方法完整说一遍。每周都给了交付物、完成标准和建议时长——时长是给忙碌工程师的参考值，不是及格线。</p>
 
@@ -662,7 +622,7 @@
 <footer>
   <div class="foot-in">
     <span><a href="level4.html">← 实战关卡四 · GitHub 2018：四十三秒与二十四小时</a></span>
-    <span><a href="appendix-cards.html">全书病历卡总检 · 前往附录图鉴</a></span>
+    <span><a href="appendix-cards.html#mech">全书病历卡三类总检 · 附录图鉴机制轴</a></span>
     <span><a href="appendix-cards.html">附录 A · 病历卡图鉴 →</a></span>
   </div>
 </footer>
