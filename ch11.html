@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 11 章 · 幂等与分布式锁——用户狂点了八次购买 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch10.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch12.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 3 · 分布式深水区 · 第 11 章</div>
+    <h1>幂等与分布式锁<br>用户狂点了八次购买</h1>
+    <p class="h1-sub">网络超时会让客户端重发，网关会重试，用户还会继续点。系统不能要求世界只请求一次；它必须让同一个业务意图无论到达几次，都只留下一个可解释的结果。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">11 · 1 值班现场</span>20:14，一个用户，八笔订单</h2>
+
+<p class="lead">创业第 3 年 9 个月，「秒抢」累计用户约 700 万，公司 210 人，后端 38 人。晚间加场开票刚结束，客服在 20:14 转来一张手机截图：同一用户、同一场次、同一分钟，订单列表整齐地排着 8 笔待支付记录。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 20:14:37</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] duplicate-order detector <span class="a">8 orders</span> / user U-7318 / show S-204<br>
+[<span class="a">WARNING</span>] &nbsp;gateway upstream timeout <span class="a">3 attempts</span>（20:13:58–20:14:04）<br>
+[<span class="a">WARNING</span>] &nbsp;client create-order requests <span class="a">6 taps</span> / 7.2s<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">订单服务日志：</span><br>
+<span class="t">「每次请求均生成新 order_id，8 次 INSERT 均成功」</span>
+  </div>
+</div>
+
+<p>数字看起来甚至有一点荒谬：客户端记录了 6 次点击，网关因两次上游超时补发了 2 次，订单库最终出现 8 行。每一行主键都不同，所以数据库认为它们互不冲突；每一次接口也都返回了某个订单号，所以服务成功率保持漂亮。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">同一业务意图请求</div>
+    <div class="v">8 次</div>
+    <div class="d up">▲ 6 次点击 + 2 次重试</div>
+  </div>
+  <div class="metric">
+    <div class="k">服务端生成订单号</div>
+    <div class="v">8 个</div>
+    <div class="d warn">● 每次都不同</div>
+  </div>
+  <div class="metric">
+    <div class="k">数据库 INSERT</div>
+    <div class="v">8 成功</div>
+    <div class="d up">▲ 主键无冲突</div>
+  </div>
+  <div class="metric">
+    <div class="k">用户真实意图</div>
+    <div class="v">买 1 张</div>
+    <div class="d">结果放大 8 倍</div>
+  </div>
+</div>
+
+<p>你沿着 trace 往前追：第一次请求其实在 430ms 时已经写入订单，只是响应穿过网络时超时。网关不知道结果，带着一份新的请求再次调用；客户端也没有稳定请求标识，每次点击都让服务端生成新订单号。系统没有认出「这些是同一件事」，于是忠实地做了八遍。</p>
+
+<p>更麻烦的是，其中两笔已经进入支付。现在不能简单删掉后七行：你需要找出哪一笔应保留、哪些支付要原路退、库存预扣是否释放，以及队列里还有多少重复事件在路上。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 20:17。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立刻删除同用户同场次的后 7 笔订单
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">B</span>
+    暂停该链路自动支付与出票，按用户 + 场次收敛请求，并锁定订单、支付、库存快照
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">C</span>
+    关闭网关全部重试，认为重复源头已经消失
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    给创建订单接口加一把 30 秒分布式锁，立即上线
+  </button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B 是教科书答案：先阻止副作用继续扩散。</b>暂停自动支付与出票，避免 8 笔订单继续变成 8 次扣款和 8 张票；按业务意图收敛新请求，并保存订单、支付、库存、消息四本账，才能逐笔决定保留与补偿。</p>
+    <p><b class="bad">A 的问题是顺序证据不足。</b>「后创建」不代表「未付款」或「未占库存」，数据库删除还可能让支付和出票失去关联。先做差集对账，再通过状态机取消，不能把业务补偿缩成删行。</p>
+    <p><b class="bad">C 只关掉一个重复来源。</b>用户连点、客户端超时、消息重投和人工补偿仍会制造重复；而完全关闭重试还会把短暂网络故障变成请求丢失。第 7 章已经展示过重试的放大，第 9 章也说明 at-least-once 会主动选择重复。</p>
+    <p><b class="mid">D 方向可能有用，但锁不是幂等记录。</b>30 秒内可以挡住同一键并发，却无法回答锁释放后的重复请求应该返回哪笔订单；若业务超过过期时间，锁本身还会失效。先建立稳定幂等键与结果表，再判断临界区是否需要锁。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">11 · 2 原理</span>系统要识别意图，不是识别请求</h2>
+
+<p>幂等不是「接口尽量不要重复调用」，而是一个可以验收的函数性质：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+f(f(x)) = f(x)<br>
+同一个业务意图执行多次，最终业务结果与执行一次相同
+  </div>
+</div>
+
+<p>在创建订单里，<code>x</code> 不是某个 HTTP 包，而是「用户 U-7318 购买场次 S-204 的这一次确认」。如果 8 次请求携带同一个幂等键 <code>K-8842</code>，第一次创建订单 <code>O-501</code>；后 7 次查询幂等记录并返回同一个 <code>O-501</code>，而不是继续 INSERT。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">到达次数</div>
+    <div class="v">8</div>
+    <div class="d">网络、网关、用户叠加</div>
+  </div>
+  <div class="metric">
+    <div class="k">幂等键</div>
+    <div class="v" style="color:var(--amber)">K-8842</div>
+    <div class="d">8 次保持相同</div>
+  </div>
+  <div class="metric">
+    <div class="k">订单 INSERT</div>
+    <div class="v" style="color:var(--green)">1</div>
+    <div class="d">首次请求创建</div>
+  </div>
+  <div class="metric">
+    <div class="k">重复响应</div>
+    <div class="v" style="color:var(--teal)">7</div>
+    <div class="d">返回 O-501</div>
+  </div>
+</div>
+
+<p><strong>「幂等键必须由请求方生成——由服务端生成的『唯一 ID』挡不住重试。」</strong>原因很直接：服务端只有收到请求后才生成 ID，而重试在服务端看来是一次新请求，于是又生成一个新 ID。请求方必须在第一次发送前固定业务键，并在超时、重连和手动重试时复用它。</p>
+
+<p>请求方不一定是浏览器。网关调用订单服务时，网关是请求方；订单消费者写票权时，消费者是请求方；补偿任务重放消息时，补偿任务是请求方。责任规则不变：谁发起可能重试的业务动作，谁在动作开始前固定幂等键。</p>
+
+<h3>一个可落地的幂等状态机</h3>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>键状态</th>
+        <th>请求应该做什么</th>
+        <th>返回语义</th>
+        <th>不能做什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>不存在</strong></td>
+        <td>原子占位为 PROCESSING，记录请求摘要</td>
+        <td>进入首次处理</td>
+        <td>先执行业务、事后才写幂等记录</td>
+      </tr>
+      <tr>
+        <td><strong>PROCESSING</strong></td>
+        <td>校验请求摘要一致，等待或返回处理中</td>
+        <td>不重复执行副作用</td>
+        <td>把同键不同参数当成同一请求</td>
+      </tr>
+      <tr>
+        <td><strong>SUCCEEDED</strong></td>
+        <td>读取持久化结果</td>
+        <td>返回第一次的订单号与状态</td>
+        <td>重新生成响应里的业务标识</td>
+      </tr>
+      <tr>
+        <td><strong>FAILED_RETRYABLE</strong></td>
+        <td>按版本抢占重试权，沿用原键</td>
+        <td>成功后覆盖为最终结果</td>
+        <td>换键绕过失败记录</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>幂等键还要绑定<strong>请求摘要</strong>。如果客户端错误地复用 <code>K-8842</code>，第一次买 1 张，第二次改成 3 张，服务端不能悄悄返回第一次结果；应拒绝「同键不同参数」，让调用方生成新的业务意图。否则幂等会从防重复变成吞请求。</p>
+
+<p>数据库护栏常用复合 UNIQUE 约束，例如 <code>(tenant_id, idempotency_key)</code>。两个实例同时看见记录不存在并发 INSERT 时，只有一个能成功；另一个捕获冲突后读取已有结果。这里的约束不是完整幂等逻辑，但它是竞态穿过应用层检查后的最后闸门。</p>
+
+<h3>幂等记录保留多久，也是一份业务契约</h3>
+
+<p>幂等记录不能刚返回响应就删除。一个超时请求可能在几十秒后由网关重试，也可能在数小时后由死信任务重放；若记录已经清理，同一个业务键会再次变成「首次请求」。反过来，持续保留每个键又会让结果表不断增长，查询索引和存储成本都要交账。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>时间层</th>
+        <th>要覆盖的重复来源</th>
+        <th>建议保存什么</th>
+        <th>清理前检查</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>短时重试窗</strong></td>
+        <td>客户端连点、网络超时、网关自动重试</td>
+        <td>完整状态与可直接返回的响应摘要</td>
+        <td>请求是否仍在 PROCESSING，调用方最长重试多久</td>
+      </tr>
+      <tr>
+        <td><strong>异步重放窗</strong></td>
+        <td>消息重投、死信恢复、批量补偿</td>
+        <td>业务键、请求摘要、结果引用、最终状态</td>
+        <td>队列保留期和补偿任务的最晚执行时间</td>
+      </tr>
+      <tr>
+        <td><strong>业务争议窗</strong></td>
+        <td>退款、客服申诉、财务对账</td>
+        <td>订单与支付引用、首次处理时间、审计字段</td>
+        <td>业务单据是否仍可能被追溯或撤销</td>
+      </tr>
+      <tr>
+        <td><strong>归档期</strong></td>
+        <td>低频审计，不再参与在线去重</td>
+        <td>压缩后的键与结果指纹</td>
+        <td>在线索引已移除，审计记录仍可按单号检索</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>例如客户端最长重试 2 分钟、消息保留 24 小时、死信允许运营在 7 天内重放，那么在线幂等证据只保留 10 分钟显然不够。更稳妥的做法是让热记录覆盖 7 天重放窗，再把最终结果压缩归档；PROCESSING 记录则单独设超时扫描，不能和已完成记录一起粗暴过期。</p>
+
+<p>清理任务本身也要幂等。它只能删除已经进入终态、超过业务窗口且没有待处理补偿的记录；若清掉一条仍有死信在路上的键，后到消息就会重新执行副作用。存储账单可以通过分区、冷热分层和结果摘要降低，不能通过遗忘仍有效的业务证据来降低。</p>
+
+<div class="kicker">重试解决「请求可能没到」，幂等解决「请求其实已经到了」。可靠链路通常需要两者配对：保留重试，但让每次重试携带同一个业务意图。</div>
+
+<h3>分布式锁的四张死亡证明</h3>
+
+<p>幂等记录回答「这件事做过没有、结果是什么」；分布式锁回答「此刻谁能进入临界区」。两者不是替代关系。锁若设计不完整，低频竞态会在最难复现的时刻穿过：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>死法</th>
+        <th>时间线</th>
+        <th>结果</th>
+        <th>护栏</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>没设过期</strong></td>
+        <td>A 拿锁后进程退出，没有执行释放</td>
+        <td>后续请求持续拿不到锁，业务死锁</td>
+        <td>租约过期 + 可观测持有者 + 人工解锁手册</td>
+      </tr>
+      <tr>
+        <td><strong>过期太短</strong></td>
+        <td>A 业务需 8s，锁在 3s 过期；B 于 3.1s 拿锁</td>
+        <td>A、B 在 4.9s 内同时执行临界区</td>
+        <td>合理租约、续约、下游 fencing token</td>
+      </tr>
+      <tr>
+        <td><strong>误删他人锁</strong></td>
+        <td>A 的锁过期，B 拿到新锁；A 完成后直接 DEL</td>
+        <td>A 删除 B 的锁，C 又进入临界区</td>
+        <td>value 存 owner，Lua 比较 owner 后释放</td>
+      </tr>
+      <tr>
+        <td><strong>主从切换丢锁</strong></td>
+        <td>主节点写入锁后、复制前故障；副本提升</td>
+        <td>新主没有锁，第二个持有者获得许可</td>
+        <td>理解一致性边界；高风险写由权威系统校验 fencing token</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>第二与第三种死法可以用具体时间复盘：A 在 0s 获得 owner=A、租约 3s；3.1s 时 B 获得 owner=B；8s 时 A 完成，如果执行裸 <code>DEL lock</code>，它删掉的是 B 的锁。正确释放必须原子比较当前 value 是否仍为 A，只有匹配才删除。</p>
+
+<p>但 owner 校验仍挡不住 A 在锁过期后继续写下游。A 可能经历长时间 GC 停顿，醒来时不知道租约已经失效。第 15 章会引入 fencing token：每次获锁拿到递增令牌，下游拒绝比已见令牌更旧的写入。这样即使旧持有者醒来，它也无法覆盖新持有者的结果。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">11 · 3 病历卡</span>大盘平静，临界区突然多了一个人</h2>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>分布式锁失效</h3>
+    <span class="case-no">病历卡 No.13</span>
+  </div>
+  <div class="case-alias">Distributed Lock Failure · 持有锁不等于仍有写入资格</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">锁没有过期导致遗留死锁；租约短于业务时间导致并发持有；释放时不校验 owner 误删新锁；主从切换丢失尚未复制的锁记录。应用仍按「拿过锁」继续写，临界区出现多个执行者。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁█▁▁</span>　低频但每次都致命型。平时吞吐与锁成功率正常，只在 GC 停顿、长尾任务或故障切换附近出现一次重复扣减、状态倒退或库存分叉，随后曲线恢复平静。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">业务时长接近锁 TTL；进程停顿或网络分区；释放使用无条件 DEL；锁服务异步复制后故障切换；旧持有者恢复后继续写下游。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>租约有界且可续</strong>：按长尾耗时配置并监控续约；② <strong>owner 校验释放</strong>：比较与删除放在原子脚本；③ <strong>业务幂等兜底</strong>：重复进入也不重复生效；④ <strong>fencing token</strong>：下游拒绝旧持有者写入。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」一次票权归还任务耗时从平时 400ms 抖到 6s，3s 锁已过期；第二个实例接手后，旧实例恢复并无条件删除新锁，第三个实例也进入临界区，最终同一张票被重复释放。</div>
+    </div>
+  </div>
+</div>
+
+<p>记住 <span class="sym">▁▁█▁▁</span>：它不像持续过载那样给你充足证据，而是在低概率时序重合时扎一针。排查要保留 owner、token、获取与释放时间、进程停顿和故障切换事件；没有这些字段，复盘只会剩一句「理论上不该发生」。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">11 · 5 权衡</span>幂等放网关，还是放业务接口</h2>
+
+<p>8 笔订单收敛后，团队要确定幂等能力的归属。统一网关擅长挡重复请求，业务接口才知道「什么算同一件事」。两种设计都能成立，也可以组合；关键是别让双方都以为对方会处理。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>「秒抢」的幂等逻辑应该由谁负责？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    网关统一处理：校验幂等键、缓存响应、挡住并发重复
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    每个接口自治：按业务状态机定义键、结果与重试边界
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    两层组合：网关做通用占位，业务库做最终幂等与 UNIQUE 兜底
+  </button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · 网关统一</b>：接入规则一致，能在流量入口合并并发请求，重复请求不必到达后端。<strong>账单：</strong>网关不了解订单状态机，难以判断同键不同参数、长任务和补偿重放；缓存结果丢失后仍要有业务兜底。适合无复杂副作用、响应可短期缓存的接口。</p>
+    <p><b class="mid">B · 接口自治</b>：业务能把幂等记录与订单、支付状态放在同一事务或同一不变量中，语义最准确。<strong>账单：</strong>每个团队都要实现状态、清理、监控和冲突处理，容易出现十种方言。适合业务差异大、结果需要长期可查询的核心写接口。</p>
+    <p><b class="mid">C · 两层组合</b>：网关吸收短时并发，业务库对跨时重试、消息重放和补偿提供最终证据。<strong>账单：</strong>两层状态可能不同步，必须明确以业务结果为准，并处理网关超时但业务已成功的查询。适合高并发且副作用昂贵的订单链路。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：采用 <strong>C</strong>。网关要求客户端提供幂等键并做短时请求合并；订单服务把键、请求摘要和结果写入业务库，以 <code>(tenant_id, key)</code> 的 UNIQUE 约束兜底。网关结果不确定时查询业务状态，而不是生成新键重试。第 9 章的消息消费者与人工补偿也复用同一业务键。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">11 · 6 复盘</span>那八笔订单后来怎么收敛成一笔</h2>
+
+<p>回放 20:14 的正确剧本——先冻结副作用，再选定业务意图，最后让各路重试返回同一结果：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">20:17</span>
+    <p><strong>冻结自动链路。</strong>暂停该用户相关订单的自动支付确认、出票和库存释放，截住仍在队列中的重复事件；8 笔订单状态不再继续分叉。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">20:23</span>
+    <p><strong>四本账对齐。</strong>按用户、场次、客户端会话和时间窗合并订单、支付、库存与消息，保留最早已付款且有库存凭证的一笔，其余 7 笔进入显式取消与退款流程。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">20:41</span>
+    <p><strong>上线幂等护栏。</strong>客户端在确认页生成稳定键，网关透传；订单库新增幂等记录与 UNIQUE 约束。并发回放 8 次只产生 1 次 INSERT，其余返回同一订单号。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">21:06</span>
+    <p><strong>补齐锁证据。</strong>分布式锁 value 改为 owner + token，释放使用原子比较；告警新增锁持有时长超过租约 70%、owner 不匹配释放和重复业务键冲突。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>把超时当成结果未知，不要当成失败。</strong>没收到响应时先用原幂等键查询；换键重试会把一次不确定动作变成两次确定副作用。</div>
+  </div>
+  <div class="li">
+    <span class="num">贰</span>
+    <div><strong>幂等必须保存第一次结果。</strong>只挡住第二次执行还不够，调用方需要拿回同一订单号与状态，才能停止继续重试。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>锁是临时许可，不是业务真相。</strong>租约会过期、主从会切换、进程会停顿；业务幂等与下游 token 校验才是重复进入后的最后护栏。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">11 · 7 自测</span>重复到达时，你会留下几个结果</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">锁服务平时曲线稳定，某次长 GC 后出现 <span class="sym">▁▁█▁▁</span>：同一库存被重复释放一次，随后指标恢复。最符合哪张病历卡？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>消息积压</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">B</span>No.13 分布式锁失效</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>缓存雪崩</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>连接池耗尽</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">B。</b>低频单针、长停顿附近重复进入临界区，正是 No.13 的形状。A 会持续爬升，C 是命中率断崖，D 是连接阶跃打满；只看「出过一次错」不够，时序与形状共同指向锁租约失效。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 幂等算术</h3>
+  <p class="stem">同一业务意图带同一个幂等键到达 8 次，第一次成功创建订单，后 7 次正确命中幂等结果。应有多少次订单 INSERT、多少次复用响应？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">A</span>1 次 INSERT，7 次复用</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>8 次 INSERT，0 次复用</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>0 次 INSERT，8 次复用</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>4 次 INSERT，4 次复用</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">A。</b>第一次建立业务结果，后续请求返回它，所以 <code>f(f(x))=f(x)</code>。B 是没有幂等时的事故现场；C 忘了首次请求仍需创建结果。幂等减少的是重复副作用，不是取消首次执行。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 谁生成键</h3>
+  <p class="stem">为什么创建订单后由服务端生成 order_id，不能单独解决客户端超时重试？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>因为 order_id 不能存数据库</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>因为每次重试到达后都会生成新 ID，服务端无法据此识别同一意图</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>因为客户端不能发送任何标识</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>因为网络超时说明首次请求没有到达</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b>识别必须发生在副作用之前，而服务端 order_id 在请求到达后才生成。D 是最诱人的错误：超时只说明响应未知，首次请求可能已经提交。请求方在首次发送前固定幂等键，重试时才能指向同一意图。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 误删锁</h3>
+  <p class="stem">A 的锁过期后 B 拿到新锁，随后 A 完成并执行无条件 DEL。风险是什么，正确释放是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>没有风险，锁名相同就属于 A</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>A 会删掉 B 的锁；应原子比较 owner 匹配后再删除</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>只需把 DEL 重试三次</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>把锁 TTL 改成 0</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>锁 key 相同，value 的 owner 已经从 A 变成 B；裸 DEL 会误删新租约。A 把「曾经持有」误当成「现在仍持有」。比较 owner 与删除必须在同一个原子动作里，否则比较之后仍可能发生切换。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「接口幂等怎么设计？」</b>
+    <span class="ans">答题骨架：请求方预生成业务键 → 同键绑定请求摘要 → 原子占位 → 业务结果与状态持久化 → 重复请求返回第一次结果 → 超时按原键查询 → TTL 与归档策略。</span>
+  </div>
+  <div class="iq">
+    <b>「分布式锁有哪些坑？」</b>
+    <span class="ans">答题骨架：无过期死锁 → TTL 太短并发持有 → 无 owner 校验误删 → 主从切换丢锁 → GC/网络分区后的旧持有者 → 幂等 + fencing token 兜底。</span>
+  </div>
+  <div class="iq">
+    <b>「唯一索引兜底怎么做？」</b>
+    <span class="ans">答题骨架：从业务意图选择复合键 → 数据库 UNIQUE 约束抵住并发 INSERT → 冲突后读取既有结果 → 同键不同参数拒绝 → 说明它只兜写入竞态，不能替代完整状态机。反直觉加分点：冲突是幂等命中，不应统一翻译成 500。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch10.html">← 第 10 章 · 超卖！——库存一致性</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.13 已收录于附录图鉴</a></span>
+    <span><a href="ch12.html">第 12 章 · 秒杀架构专章——瞬时百倍流量的完整作战方案 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

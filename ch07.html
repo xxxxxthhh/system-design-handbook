@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 章 · 重试风暴与级联故障——好心办坏事 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch06.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="level2.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 2 · 缓存与流量 · 第 7 章</div>
+    <h1>重试风暴与级联故障<br>好心办坏事</h1>
+    <p class="h1-sub">支付渠道只是变慢，没有进程崩溃，也没有机器断电。五分钟后整个平台却一起瘫痪——每一层都想替用户再试一次，善意在调用链末端乘成了风暴。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">07 · 1 值班现场</span>19:40，一个下游开始慢；19:45，全站开始倒</h2>
+
+<p class="lead">创业第 2 年 2 个月，「秒抢」累计用户约 100 万。公司 95 人，后端 18 人。周五 19:40，第三方支付渠道的响应从 180ms 抖到 2.4s；健康检查仍是绿色，成功请求也仍在返回。五分钟后，订单、用户和场次接口却一起超时。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 19:45:09</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] payment-channel P99 <span class="a">2.4s</span>，timeout 41%<br>
+[<span class="r">CRITICAL</span>] terminal payment attempts <span class="a">54,200 QPS</span>（入口支付 2,010 QPS）<br>
+[<span class="a">WARNING</span>] &nbsp;order-service worker busy 100%，pending retries 18.6 万<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">阿凯：</span><br>
+<span class="t">「进程都活着，探活全绿，但每个服务都在等别的服务！」</span>
+  </div>
+</div>
+
+<p>你拉出调用链：网关调用订单，订单调用支付编排，支付编排调用渠道。三层客户端都配置了「失败最多尝试 3 次」，超时后立即重试，没有 backoff，也没有 jitter。入口只有约 2,010 QPS，末端却出现约 54,200 次尝试，接近 27 倍。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">入口支付请求</div>
+    <div class="v">2,010 QPS</div>
+    <div class="d down">● 没有突发流量</div>
+  </div>
+  <div class="metric">
+    <div class="k">调用层数 / 尝试</div>
+    <div class="v">3 层 × 3 次</div>
+    <div class="d warn">● 层层重试</div>
+  </div>
+  <div class="metric">
+    <div class="k">末端尝试</div>
+    <div class="v">54,200 QPS</div>
+    <div class="d up">▲ 约 27 倍</div>
+  </div>
+  <div class="metric">
+    <div class="k">真实组件故障</div>
+    <div class="v">0 台宕机</div>
+    <div class="d warn">● 全部过载等待</div>
+  </div>
+</div>
+
+<p>支付渠道的慢请求占住支付线程；支付编排的等待占住订单线程；订单超时又触发网关重试。线程池和连接池被“稍后还会再试”的请求填满，健康接口拿不到资源。故障已经不再属于支付渠道，而是沿着共享资源向上游传播。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 19:45。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    把每层尝试次数从 3 提到 5，尽量跨过渠道抖动
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    滚动重启订单和支付服务，清空 18.6 万待发重试
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    对该渠道打开熔断，停止链路内重试，支付快速失败或切备用
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    联系渠道值班并临时扩容支付服务工作线程
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先切断放大器。</b>
+      熔断让新请求不再进入已变慢的渠道，停止链路内重试则立即压低末端尝试；可以切备用的支付走备用，不能切的明确失败。只要不再制造新重试，积压才有机会排空。
+    </p>
+    <p>
+      <b class="bad">A 会把事情按乘法变得更糟。</b>
+      3 层每层 5 次的最坏放大是 <code>5³ = 125</code>，不是只多两次。渠道已经慢，更多尝试会占住更多线程，让本来可能成功的请求也排到超时。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      重启能清掉本机待发事件，但入口和上游重试仍在；新实例刚就绪就会重新接收风暴。多实例同时重连下游，还可能制造一轮同步尖峰。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      联系渠道是必要动作，支付线程也可能需要调优；可扩线程只会允许更多慢调用同时堆在渠道上。先熔断和停重试，再判断本地容量是否仍是瓶颈。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">07 · 2 原理</span>每层都多试一次，末端按乘法收账</h2>
+
+<p>调用链上的重试不是相加关系。若每一层在下游失败后都独立尝试，上一层的一次重试会重新触发下一层的整组尝试。层数越多，末端收到的请求越接近各层尝试次数的乘积。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+末端放大倍数 = ∏( 每层尝试次数 )
+  </div>
+</div>
+
+<p>代入现场：网关、订单、支付编排共 3 层，每层最多尝试 3 次，末端最坏放大为 <strong>3 × 3 × 3 = 27 倍</strong>。入口 2,000 QPS 便可能变成 54,000 次/秒渠道调用；一次局部变慢，被自己的“可靠性策略”放大成全链路过载。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">1 层 × 3 次</div>
+    <div class="v" style="color:var(--green)">3 倍</div>
+    <div class="d">2,000 → 6,000</div>
+  </div>
+  <div class="metric">
+    <div class="k">2 层 × 3 次</div>
+    <div class="v" style="color:var(--amber)">9 倍</div>
+    <div class="d">2,000 → 18,000</div>
+  </div>
+  <div class="metric">
+    <div class="k">3 层 × 3 次</div>
+    <div class="v" style="color:var(--red)">27 倍</div>
+    <div class="d">2,000 → 54,000</div>
+  </div>
+  <div class="metric">
+    <div class="k">3 层 × 5 次</div>
+    <div class="v" style="color:var(--red)">125 倍</div>
+    <div class="d">D1 的错误加码</div>
+  </div>
+</div>
+
+<p>backoff 和 jitter 改变的是到达时间，不是数学上已经允许的尝试总量。立即重试会让请求挤在同一小段时间里；指数 backoff 把第 2、3 次尝试推迟，峰值下降、波形拉宽；jitter 再给等待加随机扰动，把同一时刻超时的客户端打散。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>策略</th>
+        <th>末端波形</th>
+        <th>累计尝试</th>
+        <th>解决什么</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>立即重试</strong></td>
+        <td>同一时刻堆出陡峭尖峰</td>
+        <td>接近完整预算</td>
+        <td>只适合极短、极低概率的瞬态失败</td>
+      </tr>
+      <tr>
+        <td><strong>backoff</strong></td>
+        <td>峰值降低，波形向时间轴摊开</td>
+        <td>总量变化不大</td>
+        <td>给下游恢复时间，降低瞬时压力</td>
+      </tr>
+      <tr>
+        <td><strong>backoff + jitter</strong></td>
+        <td>同步波峰被随机打散，尖刺更低</td>
+        <td>仍受重试预算约束</td>
+        <td>避免客户端在相同退避点集体醒来</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>重排波形还不够，系统需要三类护栏：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>护栏</th>
+        <th>机制</th>
+        <th>关键状态或预算</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>熔断器</strong></td>
+        <td>失败率越线后停止调用，等待后少量探测</td>
+        <td>Closed 正常 → Open 快速失败 → Half-open 探测恢复</td>
+      </tr>
+      <tr>
+        <td><strong>舱壁</strong></td>
+        <td>为支付渠道、订单查询等依赖分开线程池与并发槽</td>
+        <td>一个依赖耗尽自己的舱位，不借走健康功能资源</td>
+      </tr>
+      <tr>
+        <td><strong>重试预算</strong></td>
+        <td>把额外尝试限制为原始请求的一小部分</td>
+        <td>按时间窗统计 retry / original，超预算便停止重试</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>熔断不是限流。限流在依赖健康时也按容量控制进入量；熔断根据近期失败判断某条依赖是否应暂时停止调用。舱壁也不负责判断成败，它只保证支付渠道的等待不会借走用户资料接口的线程。三者叠在一起，才构成传播边界。</p>
+
+<div class="kicker">可靠性机制也要有爆炸半径。重试若没有单一责任层、端到端预算和随机退避，就不是保险，而是一张允许系统在最脆弱时追加负债的信用卡。</div>
+
+<p>第 5 章的冷缓存死亡螺旋与重试风暴属于同一族：触发点消失后，系统自己制造的负载仍可能让它留在坏状态。附录 No.16「亚稳态故障」会给这种“不再需要外部推力也无法恢复”的状态单独建档。第 14 章则会教你从 metrics、traces 和 logs 里辨认是谁先慢、请求在哪里被放大。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">07 · 3 病历卡</span>放大、同步与逐层熄灭</h2>
+
+<p>三张卡经常连着出现：先有重试量自持续爬升，再有同一退避时刻的惊群尖刺，最后共享资源耗尽，服务从下游向上游逐层熄灭。处方必须同时限制总量、打散时间并隔离资源。</p>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>重试风暴</h3>
+    <span class="case-no">病历卡 No.07</span>
+  </div>
+  <div class="case-alias">Retry Storm · 失败请求产生更多失败请求</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">下游变慢或超时后，上游立即重试；多层独立重试按乘法放大末端请求。新增尝试继续占住线程与连接，造成更多超时，又生成下一轮重试。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▂▄█████</span>　自持续爬升型。原始入口流量稳定，末端 QPS、待发重试和超时率却持续上升；触发方恢复后，积压也可能让高位维持一段时间。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">调用链多层配置默认重试；超时后无 backoff；非幂等请求也重试；客户端、网关和服务各自只看局部成功率，没有端到端预算。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>指定重试责任层</strong>：链路只保留一个主要重试者；② <strong>重试预算</strong>：限制额外尝试占比；③ <strong>backoff + jitter</strong>：降低同步峰；④ <strong>熔断</strong>：下游持续失败时快速停止调用。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」入口支付约 2,010 QPS，三层各尝试 3 次后，渠道端出现约 54,200 QPS；待发重试升到 18.6 万，原始流量没变，系统却被自己产生的尝试压满。</div>
+    </div>
+  </div>
+</div>
+
+<div class="case-card no5">
+  <div class="case-head">
+    <h3>惊群效应</h3>
+    <span class="case-no">病历卡 No.08</span>
+  </div>
+  <div class="case-alias">Thundering Herd · 大量等待者在同一时刻醒来</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">大量请求同时超时，使用相同固定退避后又在同一时刻醒来；它们争抢刚恢复的少量资源，再次打满下游，形成周期性同步冲击。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁█▁▁█▁</span>　周期同步尖刺型。QPS 和连接建立数按固定间隔出现尖峰，峰与统一超时、缓存 TTL、定时任务或固定 backoff 周期对齐。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">客户端使用相同固定重试间隔；服务恢复时积压请求同时放行；锁释放后大量等待线程竞争；同批 TTL 或定时任务在整点触发。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>随机抖动</strong>：在退避时间上加入扰动；② <strong>慢放量</strong>：恢复后逐步提高并发；③ <strong>请求合并</strong>：相同工作只让一个执行者完成；④ <strong>错峰</strong>：TTL 与定时任务加入随机分布。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」第一版客户端统一等待 1 秒再试，渠道 QPS 每秒冒出一根尖刺；加入指数 backoff 后尖峰摊开，再加入 ±50% jitter，客户端不再在同一个刻度集体醒来。</div>
+    </div>
+  </div>
+</div>
+
+<div class="case-card no6">
+  <div class="case-head">
+    <h3>级联故障</h3>
+    <span class="case-no">病历卡 No.09</span>
+  </div>
+  <div class="case-alias">Cascading Failure · 一个依赖过载拖走整条调用链</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">下游变慢占住上游线程、连接和队列；上游无法服务其他请求，又让更上游等待与重试。共享资源把局部故障传播成多服务不可用，即使各进程仍能通过探活。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">███▇▅▃▁</span>　上游先亡、逐层熄灭型。调用链靠近故障点的服务先出现长尾，随后上游可用率按依赖顺序下降；探活可能仍绿，业务吞吐却接近归零。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">服务共用线程池或连接池；下游无超时和熔断；同步调用链过长；重试风暴放大流量；健康检查不覆盖真实业务依赖。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>熔断</strong>：失败越线后停止调用；② <strong>舱壁隔离</strong>：每个依赖拥有独立资源上限；③ <strong>限流降级</strong>：在传播前减量；④ <strong>端到端超时</strong>：上游放弃后取消下游工作。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」支付渠道只是变慢，支付、订单、网关却依次耗尽工作线程；用户资料等无关接口也因共享池排队。没有组件宕机，平台仍在五分钟内从局部慢退化为全站超时。</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">07 · 4 模拟器</span>好心如何乘成一场风暴</h2>
+<p style="max-width:760px">把入口请求沿调用链逐层展开：重试次数在末端相乘，backoff 与 jitter 只重排请求到达时间，不会凭空消掉请求。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">RETRY STORM SIMULATOR · 秒抢调用链</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="末端到达 QPS 波形与重试放大倍数"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--red)"></i>末端到达 QPS</span>
+    <span><i style="background:var(--amber)"></i>期望放大倍数（虚线）</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">期望放大</div><div class="v" id="m-amplification">—</div></div>
+    <div class="sim-metric"><div class="k">末端瞬时到达</div><div class="v" id="m-terminal">—</div></div>
+    <div class="sim-metric"><div class="k">累计末端请求</div><div class="v" id="m-cumulative">—</div></div>
+    <div class="sim-metric"><div class="k">待发重试事件</div><div class="v" id="m-pending">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-failure">💥 注入下游故障</button>
+    <label class="toggle"><input type="checkbox" id="tg-backoff">backoff</label>
+    <label class="toggle"><input type="checkbox" id="tg-jitter">jitter</label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>调用层数 <span id="lb-layers">3 层</span></label>
+      <input type="range" id="sl-layers" min="1" max="4" step="1" value="3"></div>
+    <div class="slider"><label>每层尝试次数 <span id="lb-retries">3 次</span></label>
+      <input type="range" id="sl-retries" min="1" max="4" step="1" value="3"></div>
+    <div class="slider"><label>下游故障率 <span id="lb-failure">100%</span></label>
+      <input type="range" id="sl-failure" min="0" max="100" step="1" value="100"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>看乘法。</strong>保持每层 3 次、故障率 100%，把层数设为 1、2、3 并分别注入 → 末端放大依次为 3、9、27（误差小于 5%）。<strong>重试是指数放大，不是逐层相加。</strong></li>
+    <li><strong>摊开尖峰。</strong>保持 3 层 × 3 次，先关闭 backoff 注入，再重置、开启 backoff 注入 → 累计请求数变化不到 10%，但峰值下降超过 40%。<strong>backoff 治瞬时峰，不治总量。</strong></li>
+    <li><strong>打散同步。</strong>保持 backoff 开启，再打开 jitter 并重置注入 → 峰值严格低于只开 backoff 时。<strong>±50% 扰动打散同刻重发，是惊群效应的解药。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->
+<div class="wrap">
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">07 · 5 权衡</span>重试权应该交给谁</h2>
+
+<p>重试本身不是错误；没有明确责任层才危险。入口统一重试便于控制总预算，每层重试能处理局部瞬态，指定最接近失败边界的一层则减少重复。三个选择都能成立，前提是幂等、deadline 和预算写得足够清楚。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>支付调用链的重试应该放在哪里？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    只在入口层重试，内部服务不自动重试
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    每层都可重试，但共享端到端预算与幂等键
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    指定单一责任层：最了解该失败语义的调用者重试
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 只在入口层</b>：末端放大容易计算，重试次数、deadline 和用户反馈集中治理。
+      <strong>账单：</strong>入口离具体失败最远，可能分不清网络抖动、业务拒绝与不可重试错误；一次入口重试会重做整条链。适合调用链短、内部服务稳定、错误语义可统一映射的场景。
+    </p>
+    <p>
+      <b class="mid">B · 每层都重试</b>：各层可以就近处理独立的短暂网络故障，局部恢复快。
+      <strong>账单：</strong>必须共享端到端尝试预算、幂等键和剩余 deadline，否则立刻回到乘法放大；治理与观测复杂。适合层数少、故障域独立、重试协议成熟的内部基础设施。
+    </p>
+    <p>
+      <b class="mid">C · 单一责任层</b>：最了解错误码和副作用的调用者决定是否重试，既避免入口盲试，也避免层层叠加。
+      <strong>账单：</strong>要在架构评审中明确 owner，跨团队变更可能让责任漂移；该层仍需预算、backoff 与 jitter。适合支付、库存等错误语义复杂且副作用明确的链路。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：采用 <strong>C</strong>。支付编排是渠道错误语义的 owner，只允许它对明确可重试的网络失败尝试一次；网关与订单层不再自动重试支付。理由是支付有副作用，入口无法判断“超时但已扣款”，而每层重试的 27 倍账单已经在 19:45 交过一次。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">07 · 6 复盘</span>先停重试，再等系统喘气</h2>
+
+<p>回放 19:45 的正确剧本——若顺序倒过来，任何扩容和重启都会被新的重试重新淹没：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">19:45</span>
+    <p><strong>切断放大。</strong>对异常渠道打开熔断，关闭网关与订单层支付重试；末端尝试从约 54,200 QPS 在一分钟内降到 7,400 QPS。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">19:47</span>
+    <p><strong>隔离舱壁。</strong>将支付渠道调用移回独立线程池，限制并发；用户资料、场次和普通订单查询释放共享线程，非支付接口成功率回到 98.1%。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">19:51</span>
+    <p><strong>排空积压。</strong>不重启服务，让待发事件按新预算自然过期；pending retries 从 18.6 万降到 1.2 万，order-service P99 从 6.2s 回到 480ms。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">19:58</span>
+    <p><strong>半开探测。</strong>熔断器进入 Half-open，只放少量带 jitter 的探测；连续成功后逐步恢复渠道流量，未出现同步尖峰。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>重试次数要按链路算。</strong>某个服务“只试三次”听起来克制，三层叠起来却是 27 倍；评审必须画到末端。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>backoff 降峰，预算降总量。</strong>只有退避而没有预算，请求只是晚一点到；两者再配 jitter，才同时控制总数与同步波形。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>共享资源就是传播通道。</strong>为每个高风险依赖设置舱壁、熔断和超时，让支付变慢时只失去支付，不要把用户资料也一起拖走。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">07 · 7 自测</span>你的好心会放大多少倍</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">入口流量稳定，末端请求与超时率却呈 <span class="sym">▁▂▄█████</span>，触发故障停止后仍在高位一段时间。最可能是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>重试风暴</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>缓存击穿</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>主从复制延迟</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>缓存与 DB 双写不一致</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>原始流量没涨，系统内部尝试却自持续爬升，是 No.07 的核心证据。B 很诱人，因为击穿也会产生尖峰，但击穿通常是单个热点 key 的瞬时竖刺，不是待发尝试维持的高平台。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 放大算术</h3>
+  <p class="stem">4 层调用链，每层最多尝试 2 次。末端最坏放大倍数是多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>8 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>12 倍</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">C</span>16 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>32 倍</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">C。</b><code>2 × 2 × 2 × 2 = 16</code>。A 是最诱人的错误项，它把 4 层 × 2 次做成了加法；重试会重新触发后续整条链，所以必须乘起来。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 熔断三态</h3>
+  <p class="stem">熔断器在 Open 一段时间后，只允许少量请求探测下游是否恢复。此时是什么状态？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>Closed</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>Open</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">C</span>Half-open</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>Leaking</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">C。</b>Half-open 用少量探测决定回到 Closed 还是重新 Open。B 很诱人，因为熔断仍未完全恢复，但 Open 应快速拒绝常规调用，不承担恢复探测流量。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · jitter 的价值</h3>
+  <p class="stem">已经用了指数 backoff，为什么还要加入 jitter？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>把累计重试数直接降为零</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>打散同一退避刻度醒来的请求，降低同步尖峰</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>让失败请求变成成功</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>替代熔断器判断下游健康</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>相同 backoff 仍会让同时失败的请求在相同刻度醒来，jitter 用随机扰动拆散这一群。A 是诱人的误解：jitter 改的是时间分布，不负责取消已获准的尝试，总量仍要靠重试预算控制。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「重试为什么会把小故障放大？」</b>
+    <span class="ans">答题骨架：画调用层 → 写乘积公式 → 代入 3×3×3=27 → 解释资源占用制造更多超时 → 给单一责任层、预算与幂等前提。</span>
+  </div>
+  <div class="iq">
+    <b>「熔断和限流有什么区别？」</b>
+    <span class="ans">答题骨架：限流按容量控制进入量 → 熔断按失败状态停止某依赖 → Closed/Open/Half-open → 两者与降级、舱壁组合。</span>
+  </div>
+  <div class="iq">
+    <b>「backoff 的 jitter 有什么用？」</b>
+    <span class="ans">答题骨架：backoff 把峰向后摊开 → 相同参数仍会同步醒来 → jitter 随机打散 → 说明它不减少总量。反直觉加分点：预算与 jitter 分别管总数和波形。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch06.html">← 第 6 章 · 限流与降级——学会说「不」</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.07–09 已收录于附录图鉴</a></span>
+    <span><a href="level2.html">实战关卡 2 · 云服务级联演练 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-4.js"></script>
+</body>
+</html>

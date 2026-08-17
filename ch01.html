@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 章 · 第一次卖票——一个单体的诞生 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar"><span><b>系统是被打出来的</b> · 系统设计实战手册</span><nav aria-label="章节导航"><a href="index.html">← 导读</a><a href="index.html">目录</a><a href="ch02.html">下一章 →</a></nav></div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 1 · 单机时代 · 第 1 章</div>
+    <h1>第一次卖票<br>一个单体的诞生</h1>
+    <p class="h1-sub">这一章没有故障，只有 deadline。你会画出全书的第一张架构图——一张简单到有点丢人的图。后面十五章都在改它，而它每一次被改，都是因为挨了打。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">01 · 1 值班现场</span>周一上午，白板上只有一个日期</h2>
+
+<p class="lead">你是「秒抢」的第 3 号员工，后端工程师。公司总共三个人：老陈（CTO，也是你面试官）、一个前端、你。办公室是租来的一间十二平米的房子，白板上没有架构图，只有一个日期——<strong>两周后的周五</strong>。那天有一场小型音乐节要开票，主办方答应给「秒抢」独家。这是公司的第一笔生意，也可能是最后一笔。</p>
+
+<p>老陈把需求写成了四行字，就是全部产品文档：</p>
+
+<div class="pager" aria-label="需求清单">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>WHITEBOARD · 距离开票 14 天</div>
+  <div class="pager-body">
+[<span class="a">MUST</span>] &nbsp;用户能看到场次、选座、下单<br>
+[<span class="a">MUST</span>] &nbsp;能付钱（接第三方支付）<br>
+[<span class="a">MUST</span>] &nbsp;运营能上架场次、改票价<br>
+[<span class="a">MUST</span>] &nbsp;用户能注册登录、看自己的订单<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">你的估算（老实版）：</span><br>
+<span class="r">四件事全做完，需要约 4 周。你只有 2 周。</span>
+  </div>
+</div>
+
+<p>这是全书唯一一次，危机不是「系统坏了」，而是「系统还不存在」。但它和后面十五章遵守同一条规律：<strong>在几乎每一个增长阶段，你的资源都小于需求；工程的本质是决定先付哪一笔账。</strong></p>
+
+<div class="metrics">
+  <div class="metric"><div class="k">团队规模</div><div class="v">3 人</div><div class="d">后端只有你</div></div>
+  <div class="metric"><div class="k">已有用户</div><div class="v">0</div><div class="d">还没上线</div></div>
+  <div class="metric"><div class="k">剩余工期</div><div class="v">14 天</div><div class="d warn">● 不可延期</div></div>
+  <div class="metric"><div class="k">诚实估算</div><div class="v up">28 天</div><div class="d up">▲ 缺口 2 倍</div></div>
+</div>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>四件 MUST，两周只做得完两件半。你砍什么？</h3>
+  <button class="opt" data-d="1" data-k="good"><span class="tag">A</span>砍「选座」（改为系统随机分配座位）+ 砍「运营后台」（开票前你手写 SQL 上架）</button>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>砍「支付」（先线下转账，人工核对后发票）+ 砍「选座」</button>
+  <button class="opt" data-d="1" data-k="mid"><span class="tag">C</span>砍「注册登录」（匿名下单，留手机号即可）+ 砍「运营后台」</button>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">D</span>什么都不砍，四件事各做到八成，上线后连夜补</button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">A 是对的，理由只有一条：它保住了完整的主链路。</b>「看场次 → 下单 → 付钱 → 拿到票」这条链路上任何一环缺失，产品就不是「功能少」，而是<em>不成立</em>。选座是体验，随机分配也能卖票；运营后台是效率，只有一场演出时你手写四条 <code>INSERT</code> 完全够用。<strong>砍功能，不砍链路</strong>——这是 MVP 唯一的裁剪准则。</p>
+    <p><b class="bad">B 砍掉了链路本身。</b>线下转账听起来"也能收到钱"，但它把一个自动化系统降级成了一门手工生意：对账要人、退款要人、并发售卖时你无法知道哪张票已经卖出去了。更要命的是它掩盖了库存问题——而库存正是这门生意最难的地方（第 10 章会把这个问题正面拆开）。</p>
+    <p><b class="mid">C 可行，但它埋了一颗有名字的雷。</b>匿名下单确实能跑通链路，代价是订单没有稳定的归属主体：用户换个手机号就找不回订单，客服无法验证身份，后面接入退款和实名购票时要做一次数据迁移。如果只做一场演出，C 是可以接受的；一旦你打算做第二场，这笔账就会来收。</p>
+    <p><b class="bad">D 是最诱人的错误答案，因为它听起来最努力。</b>四个八成不等于八成的产品，等于<em>零个</em>能用的链路——用户能选座却付不了钱，和网站没上线没有区别。工期不够时，正确动作是缩小范围，不是降低每件事的完成度。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">01 · 2 原理</span>一次请求的一生，和它带来的账单</h2>
+
+<p>在写第一行代码前，你需要回答两个问题：<strong>一次请求会经过哪些环节</strong>，以及<strong>这些环节要准备多大的量</strong>。前者决定架构长什么样，后者决定它要多贵。</p>
+
+<h3>一次请求经过什么</h3>
+
+<p>用户在手机上点「立即购买」，到他看见「下单成功」，中间发生的事按顺序是：</p>
+
+<ol style="margin:16px 0 16px 24px">
+  <li><strong>DNS 解析</strong>：把 <code>miaoqiang.com</code> 变成一个 IP。结果会被缓存，通常不是瓶颈，但它是你改不动的第一环。</li>
+  <li><strong>建立连接</strong>：TCP 三次握手 + TLS 握手。跨省一个来回就是几十毫秒，握手要好几个来回——这是为什么连接复用（Keep-Alive）不是优化，是基本盘。</li>
+  <li><strong>反向代理（Nginx）</strong>：接住连接、终止 TLS、分发静态文件、把动态请求转给应用。它也是你未来放限流的地方（第 6 章）。</li>
+  <li><strong>应用进程</strong>：路由、参数校验、鉴权、业务逻辑。这是全链路上你改动成本最低的一层，所以后面十五章的多数动作都发生在这里。</li>
+  <li><strong>数据库（MySQL）</strong>：连接池取连接 → 执行 SQL → 事务提交 → 归还连接。<strong>这是全链路上最慢、最贵、最难扩的一环</strong>，本书大半篇幅都在想办法少打扰它。</li>
+  <li><strong>原路返回</strong>：结果序列化、经 Nginx、经网络、回到用户屏幕。</li>
+</ol>
+
+<div class="kicker">记住这六步的顺序，因为<strong>排障是沿着它倒着走的</strong>。用户说「慢」，你的任务是判断慢在第几步。第 14 章会告诉你怎么用三种工具分别看清这六步。</div>
+
+<h3>容量估算：三步法</h3>
+
+<p>「你的系统要扛多少？」是面试和真实工作里都绕不开的问题。它不需要精确，需要的是<strong>量级正确</strong>。三步：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+日请求量 = DAU × 人均请求数<br>
+平均 QPS = 日请求量 ÷ 86,400<br>
+峰值 QPS = 平均 QPS × 峰值倍数
+  </div>
+</div>
+
+<p>代进「秒抢」首月的目标。老陈拍的数字是首月做到 <strong>2 万 DAU</strong>；你估每人每天大约 <strong>30 次请求</strong>（翻场次列表、搜索、看详情、下单各若干次）：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric"><div class="k">DAU</div><div class="v">20,000</div><div class="d">首月目标</div></div>
+  <div class="metric"><div class="k">人均请求</div><div class="v">30</div><div class="d">次 / 天</div></div>
+  <div class="metric"><div class="k">日请求量</div><div class="v">60 万</div><div class="d">次 / 天</div></div>
+  <div class="metric"><div class="k">平均 QPS</div><div class="v" style="color:var(--green)">≈ 7</div><div class="d">600,000 ÷ 86,400</div></div>
+  <div class="metric"><div class="k">日常峰值</div><div class="v" style="color:var(--green)">≈ 70</div><div class="d">×10 倍</div></div>
+</div>
+
+<p>7 QPS。日常峰值 70 QPS。<strong>一台四核机器打着哈欠就能接住。</strong>如果故事到此为止，这本书就只有一章。</p>
+
+<p>但「秒抢」不是普通网站。它的流量不是一条平缓的曲线，而是一根针。把开票那一刻单独算一次：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric"><div class="k">在售票数</div><div class="v">5,000</div><div class="d">张</div></div>
+  <div class="metric"><div class="k">蹲点人数</div><div class="v">50,000</div><div class="d">人（10 倍超卖需求）</div></div>
+  <div class="metric"><div class="k">抢购窗口</div><div class="v">10</div><div class="d">秒</div></div>
+  <div class="metric"><div class="k">人均请求</div><div class="v">3</div><div class="d">次（刷新 + 下单）</div></div>
+  <div class="metric"><div class="k">瞬时 QPS</div><div class="v" style="color:var(--red)">15,000</div><div class="d up">▲ 平均值的约 2,000 倍</div></div>
+</div>
+
+<p>50,000 × 3 = 150,000 次请求，压在 10 秒里，就是 <strong>15,000 QPS</strong>。它和你算出来的平均值 7 QPS 之间差了<em>约 2,000 倍</em>。</p>
+
+<div class="kicker">这个 2,000 倍是本书的起点。<strong>按平均值设计的系统，会被峰值杀死；按峰值堆机器的公司，会被账单杀死。</strong>整本书讲的就是怎么在这两者之间活下来——而不是二选一。</div>
+
+<h3>另外两笔账：存储与带宽</h3>
+
+<p>容量估算不只有 QPS。同样的三步法换个乘数就能用：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr><th>估什么</th><th>怎么算</th><th>「秒抢」首年</th><th>它告诉你什么</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>存储</strong></td>
+        <td>单行字节 × 日增行数 × 天数</td>
+        <td>订单行约 500 B，日均约 2,000 单 → 每天约 1 MB，一年约 <strong>365 MB</strong></td>
+        <td>订单表一年不到 1 GB。<strong>单机 MySQL 能撑很久</strong>——所以分库分表不是第 2 章的事，是第 8 章的事</td>
+      </tr>
+      <tr>
+        <td><strong>带宽</strong></td>
+        <td>单次响应字节 × QPS</td>
+        <td>详情页首屏约 300 KB。日常峰值 70 QPS → 约 21 MB/s（约 168 Mbps）</td>
+        <td>日常可控。但开票瞬间 15,000 QPS × 300 KB ≈ <strong>4.5 GB/s</strong>——这个数字不可能由你的机房出，只能由 CDN 出（第 12 章）</td>
+      </tr>
+      <tr>
+        <td><strong>连接</strong></td>
+        <td>并发数 ≈ QPS × 平均响应时间</td>
+        <td>70 QPS × 0.2s ≈ <strong>14 个并发</strong>；15,000 QPS × 0.2s ≈ <strong>3,000 个并发</strong></td>
+        <td>这条式子（Little's Law）是第 2 章的主角，也是你第一次宕机的死因</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>三笔账算完，结论出奇地一致：<strong>日常流量根本不需要复杂架构，而峰值流量再复杂的架构也未必扛得住。</strong>所以第一版就该简单——简单到你能在两周内写完、能在出事时看懂。</p>
+
+<!-- ================= 基线架构图 ================= -->
+<h2><span class="sec">01 · 3 基线架构图</span>全书的第 0 帧</h2>
+
+<p>两周后上线的东西长这样。把它记住，因为接下来的每一章都是在这张图上加东西——而每一次加东西，都是因为它被打疼了。</p>
+
+<div class="arch">
+  <div class="arch-title">「秒抢」v1.0 · 上线当天的全部架构</div>
+  <div class="arch-flow">
+    <div class="arch-node"><div class="nn">浏览器</div><div class="nd">手机 H5</div></div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node"><div class="nn">Nginx</div><div class="nd">反向代理<br>静态文件<br>TLS 终止</div></div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node"><div class="nn">应用（单体）</div><div class="nd">一个进程<br>路由 / 业务 / 定时任务<br>全都在里面</div></div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node db"><div class="nn">MySQL</div><div class="nd">一台<br>无从库<br>连接池 20</div></div>
+  </div>
+  <div class="arch-note">
+    没有的东西：缓存 · 消息队列 · 从库 · 网关 · 熔断 · 限流 · 监控大盘 · 第二台机器<br>
+    有的东西：一台 4 核 8G 云服务器，Nginx 和应用和 MySQL 挤在上面
+  </div>
+</div>
+
+<p>这张图会让任何一个做过大系统的人皱眉。但在两周工期、3 个人、0 用户的条件下，<strong>它是对的</strong>。理由是三条：</p>
+
+<ol style="margin:16px 0 16px 24px">
+  <li><strong>它能在两周内写完。</strong>没有跨进程调用，没有分布式事务，没有服务发现——一个函数直接调另一个函数。这是单体真正的优势，而不是「简单」这种模糊的说法。</li>
+  <li><strong>它出事时你能看懂。</strong>一个进程、一份日志、一个数据库。凌晨三点你不需要在四个服务之间对时间戳（那种日子在第 13 章等着你）。</li>
+  <li><strong>它的每一处不足都是可定位的。</strong>缓存缺失、单点数据库、没有限流……这些都不是隐患，是<em>写在图上的待办事项</em>。真正危险的架构不是简陋，是没人说得清它长什么样。</li>
+</ol>
+
+<p>接下来会发生什么，这张图已经写好了剧本：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>这张图的哪个位置</th><th>会在第几章挨打</th><th>被打成什么样</th></tr></thead>
+    <tbody>
+      <tr><td class="ch">应用 → MySQL 的连接池</td><td class="ch"><b>第 2 章</b></td><td>连接池打满，全站 502</td></tr>
+      <tr><td class="ch">单台 MySQL</td><td class="ch"><b>第 3 章</b></td><td>加从库，然后被复制延迟坑</td></tr>
+      <tr><td class="ch">「没有缓存」这一栏</td><td class="ch"><b>第 4–5 章</b></td><td>加了缓存，然后被缓存杀死</td></tr>
+      <tr><td class="ch">Nginx 这一层</td><td class="ch"><b>第 6 章</b></td><td>被迫学会说「不」</td></tr>
+      <tr><td class="ch">「一个进程」</td><td class="ch"><b>第 13 章</b></td><td>拆成几十个，然后为此付账</td></tr>
+      <tr><td class="ch">整张图</td><td class="ch"><b>第 16 章</b></td><td>你会亲手把它打一遍</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<p>第 16 章的收尾，我们会把这张图和它的最终形态并排放在一起。到那时你会发现：<strong>中间那十四章加进去的每一个方框，都对应一次真实的疼痛</strong>——没有一个是因为「架构应该这样」而加上去的。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">01 · 5 权衡</span>没有正确答案，只有代价</h2>
+
+<p>图画完了，还剩一个问题：<strong>用什么写。</strong>老陈把选择权给了你，附带一句「别让我三个月后招不到人」。三个候选都能在两周内交付，<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>3 人团队、2 周工期、后端只有你一个。技术栈怎么选？</h3>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">A</span>成熟全家桶：选一个主流全栈框架，ORM、路由、鉴权、后台脚手架全都自带</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">B</span>轻量自组：一个微框架 + 自己挑的库，每一层都是自己拼的</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">C</span>云托管优先：托管数据库 + 函数计算 / 容器托管，尽量不自己运维</button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · 成熟全家桶</b>：两周工期下开发速度最快，管理后台、鉴权、数据库迁移这些"必须有但不产生差异化"的东西开箱即用。招人也最容易——市面上会的人多。<strong>账单：</strong>框架替你做的决定，出问题时你也得替它背；性能调优会撞上你没写过的那一层（连接池默认值、ORM 生成的 SQL、自带的会话机制）。<em>第 2 章那次宕机，起因就藏在一个你没看过的默认值里。</em>适合业务形态清晰、团队要跑得快的早期阶段。</p>
+    <p><b class="mid">B · 轻量自组</b>：每一层都是你选的，因此每一层你都知道它的边界在哪；性能上限高，依赖少，升级时不会被框架的大版本绑架。<strong>账单：</strong>两周里你要花掉相当一部分时间造「所有人都造过」的轮子（后台、鉴权、迁移工具），而这些轮子没有一个能变成「秒抢」的竞争力；新人上手成本高，知识全在你脑子里——这在 3 人公司是最大的单点。适合团队里有明确的技术主张、且工期不是最紧约束时。</p>
+    <p><b class="mid">C · 云托管优先</b>：托管数据库省掉备份、主从、监控的搭建，3 人团队里没有专职运维，这笔省下来的时间是真金白银。<strong>账单：</strong>单位成本明显更高，且成本随流量非线性上涨；你对底层的可观测性和调参能力被平台限制住——等你需要看慢查询日志、调复制参数、做故障演练时（第 3、14、16 章），能不能做取决于平台给不给。适合流量可预期、团队极小、且愿意用钱换时间的阶段。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：<strong>A + C 的组合</strong>——用成熟全家桶写应用，数据库用云厂商的托管实例。理由很实际：两周工期下，A 省的是"写代码的时间"，C 省的是"不写代码但必须做的时间"，而 B 省的东西（可控性）在 0 用户阶段还兑现不了价值。<strong>代价你也认了：</strong>框架的默认值你没有逐个看过。这笔账在第 2 章就会来收——两周后的深夜，连接池会用一次全站 502 提醒你，<em>你没读过的默认值，也是你的架构决策</em>。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">01 · 6 复盘</span>上线那一夜</h2>
+
+<p>两周后的周四深夜，第一版上线。没有告警，没有大盘，只有你和老陈盯着一个 <code>tail -f</code> 的窗口。留意这条时间线的<strong>顺序</strong>——它是本书所有复盘的第一条，也是最平静的一条：</p>
+
+<div class="timeline">
+  <div class="tl"><span class="tt">23:10</span><p><strong>部署。</strong>手动 <code>git pull</code> + 重启进程。整个过程 40 秒，期间站点不可用——但此刻还没有用户，代价为零。<em>这个"代价为零"的假设，会在第 13 章过期。</em></p></div>
+  <div class="tl"><span class="tt">23:25</span><p><strong>自测下单。</strong>你用自己的手机号买了第一张票，订单号 <code>O-000001</code>。支付回调花了 1.2 秒返回，比预期慢，但能用。你在便签上记了一行：「支付回调超时怎么办？——待定」。</p></div>
+  <div class="tl"><span class="tt">23:48</span><p><strong>压了一轮。</strong>用一个命令行工具打了 200 QPS，持续两分钟。P99 是 180ms，CPU 40%，没有报错。你得出结论「够用了」——<em>这个结论在流量形状变化前一直成立</em>。</p></div>
+  <div class="tl"><span class="tt">次日 10:00</span><p><strong>开票。</strong>5,000 张票在 6 分钟内卖完。峰值大约 900 QPS，比你压测的高，但没到你算的 15,000——因为主办方只放了一个入口链接，人是慢慢来的。<strong>你侥幸赢了第一场。</strong></p></div>
+</div>
+
+<div class="lesson">
+  <div class="li"><span class="num">壹</span><div><strong>先算量级，再画架构。</strong>三步法算出来的 7 QPS 和 15,000 QPS，指向的是两种完全不同的系统。跳过估算直接选型，你不是在做架构，是在赌。而估算只要量级对就够了——差 3 倍无所谓，差 2,000 倍会死人。</div></div>
+  <div class="li"><span class="num">貳</span><div><strong>MVP 砍功能，不砍链路。</strong>判断一个需求能不能砍，只问一句：砍掉之后，「看 → 下单 → 付钱 → 拿到票」这条链路还完整吗？完整就砍，不完整就留。四个八成的功能，价值低于两个完整的环节。</div></div>
+  <div class="li"><span class="num">叁</span><div><strong>你没读过的默认值，也是你的架构决策。</strong>框架替你设定的连接池大小、超时时间、线程数，在流量小的时候一个都不会出声。它们会在你第一次真正需要它们的那个深夜，一起出声。第 2 章就是那个深夜。</div></div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">01 · 7 自测</span>你的估算肌肉</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">两个产品的日流量曲线：X 的形状是 <span class="sym">▃▄▅▆▅▄▃</span>（白天缓慢起伏、夜间回落）；Y 的形状是 <span class="sym">▁▁▁█▁▁▁</span>（全天极低，某个固定时刻一根垂直尖峰）。同样是日均 60 万请求，关于它们的容量规划，哪个判断最准确？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>日请求量相同，所以两者需要的服务器数量基本相同</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>X 更危险，因为它全天持续有负载，机器没有休息时间</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">C</span>Y 更危险，它的峰值倍数远高于 X，按平均值备的容量会在尖峰时刻被击穿</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>两者都只需按平均 QPS 的 1.5 倍备容量即可</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">C。</b>容量由<em>峰值</em>决定，不由总量决定——这是三步法里「峰值倍数」那一项存在的全部理由。X 的峰值倍数大概两三倍，Y 可能是几百上千倍。<b class="bad">A 是最诱人的错误答案</b>，因为「日均相同」听起来像是同一个规模的系统；但服务器接住的是<em>同时到达</em>的请求，不是一天的总和。B 把「持续有负载」当成风险，实际上平稳负载恰恰是最好规划的一种。D 的 1.5 倍对 X 都嫌紧，对 Y 是灾难。「秒抢」正是 Y。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 三步法算术</h3>
+  <p class="stem">「秒抢」第二年 DAU 涨到 50 万，人均每天 40 次请求，日常峰值倍数按 8 估。日常峰值 QPS 大约是多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>约 230</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>约 1,850</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>约 44,000</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>约 1.6 亿</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b>日请求量 = 500,000 × 40 = 2,000 万；平均 QPS = 20,000,000 ÷ 86,400 ≈ <strong>231</strong>；峰值 = 231 × 8 ≈ <strong>1,850</strong>。<b class="bad">A 是最容易掉进去的坑</b>——它算对了平均 QPS 却<em>忘了乘峰值倍数</em>，而这一步正是三步法里唯一能救命的一步。C 是把 86,400 秒错记成 3,600 的结果——只除了一小时：20,000,000 ÷ 3,600 ≈ 5,556，再乘 8 约 44,000。D 则是<em>完全没除时间</em>：直接拿日请求量 2,000 万乘 8，得到 1.6 亿。记住这个数量级感觉：<strong>百万级 DAU 对应的日常峰值通常是几千 QPS，不是几十万。</strong></p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 并发估算</h3>
+  <p class="stem">某接口平均响应时间 200ms，日常峰值 1,850 QPS。峰值时刻大约需要多少个并发处理槽位（连接 / 线程）？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>约 9 个（1,850 ÷ 200）</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>约 370 个（1,850 × 0.2）</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>约 1,850 个（每个请求一个槽位）</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>无法估算，取决于 CPU 核数</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b><code>并发数 ≈ QPS × 平均响应时间</code>（Little's Law）：1,850 × 0.2s ≈ <strong>370</strong>。<b class="bad">C 很诱人</b>，因为「每秒 1,850 个请求」听起来就该有 1,850 个槽位；但一个槽位在 1 秒内可以服务 5 个 200ms 的请求，所以需要的是 1,850 ÷ 5 = 370。A 把单位搞混了（秒和毫秒）。D 听起来最"严谨"，实际是拒绝估算——核数影响的是<em>你能开多少槽位</em>，不影响<em>你需要多少槽位</em>。这两个数字的关系，就是第 2 章的全部内容。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · MVP 裁剪</h3>
+  <p class="stem">团队工期不足，四个需求必须砍掉两个。下面哪条是最可靠的裁剪准则？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>砍掉开发工作量最大的两个，这样省下的时间最多</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>砍掉之后核心链路仍然完整的那些，无论它们工作量大小</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>砍掉用户看不见的那些（如后台、监控），保住所有用户可见功能</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>每个都做，但把每个的完成度降到六成</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>MVP 的价值在于「有一条完整的路能走通」，而不是「做了很多东西」。<b class="bad">A 是最专业的错误答案</b>——它优化的是"省下多少工时"，但如果那个最费时的需求恰好是支付，砍掉它省下的时间一文不值，因为剩下的东西卖不了票。C 的直觉在多数产品里成立，在这里却危险：运营后台确实可以砍（你手写 SQL 顶两周），但「用户看不见」不是判据，<em>链路是否完整</em>才是。D 见 D1 选项 D：四个六成等于零个可用。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq"><b>「估算一下这个系统需要多少台服务器 / 多大容量。」</b><span class="ans">答题骨架：先要 DAU 和人均请求数（没有就自己假设并说出来）→ 日请求量 → 平均 QPS → <em>乘峰值倍数</em>（说明为什么这个业务取这个倍数）→ 再用 <code>并发 ≈ QPS × RT</code> 折成机器数 → 最后单独说一句存储和带宽。反直觉加分点：主动指出峰值形状比总量重要，并问一句「这个业务的流量是平缓型还是尖峰型」。</span></div>
+  <div class="iq"><b>「讲一下从用户点击到看到结果，中间经过了什么。」</b><span class="ans">答题骨架：DNS → 建连（TCP + TLS 握手，强调来回次数）→ 反向代理 → 应用（路由/鉴权/业务）→ 数据库（连接池 → SQL → 事务）→ 原路返回。每一环补一句「这里可能慢在哪」，并点出数据库通常是最贵的一环。</span></div>
+  <div class="iq"><b>「一开始就该上微服务吗？」</b><span class="ans">答题骨架：不按偏好答，按信号答 → 团队规模与发布冲突频率、变更频率差异、故障隔离需求 → 说明单体在小团队下的真实优势是"函数调用而非网络调用" → 给出拆分的触发条件而不是时间表。可以主动说：拆分不降低复杂度，只是把它从代码搬到网络上（第 13 章会展开）。</span></div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="index.html">← 目录 · 如何使用本书</a></span>
+    <span><a href="appendix-cards.html">本章无病历卡 · 附录图鉴</a></span>
+    <span><a href="ch02.html">第 2 章 · 第一次宕机——连接池耗尽之夜 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

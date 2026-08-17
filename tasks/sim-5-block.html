@@ -1,0 +1,46 @@
+<h2><span class="sec">08 · 4 模拟器</span>扩容时，到底要搬多少 key</h2>
+<p style="max-width:760px">用固定的 10,000 个 key 对比取模与一致性哈希：先看扩容迁移量，再看虚拟节点如何修平负载，最后用单个热点 key 击穿两种方案。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">HASH RING SIMULATOR · 秒抢分片拓扑</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="哈希环、节点刻度、key 密度与每节点负载柱状图"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--teal)"></i>节点 / 虚拟节点</span>
+    <span><i style="background:var(--muted)"></i>key 密度</span>
+    <span>右侧虚线 = 平均负载</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">分片方式</div><div class="v" id="m-mode">—</div></div>
+    <div class="sim-metric"><div class="k">最近扩容迁移</div><div class="v" id="m-migration">—</div></div>
+    <div class="sim-metric"><div class="k">最大 / 平均负载</div><div class="v" id="m-imbalance">—</div></div>
+    <div class="sim-metric"><div class="k">热点注入</div><div class="v" id="m-hot">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn primary" id="btn-expand">➕ 扩容一台</button>
+    <label class="toggle"><input type="checkbox" id="tg-mode">一致性哈希（关闭 = 取模）</label>
+    <label class="toggle"><input type="checkbox" id="tg-hotspot">注入热点 key</label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>节点数 <span id="lb-nodes">4 台</span></label>
+      <input type="range" id="sl-nodes" min="3" max="8" step="1" value="4"></div>
+    <div class="slider"><label>虚拟节点数 <span id="lb-vnodes">150 / 节点</span></label>
+      <input type="range" id="sl-vnodes" min="1" max="200" step="1" value="150"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>扩容搬家。</strong>取模模式用 4 台点「扩容一台」，再重置、切一致性哈希后重做 → 取模迁移约 80%（75%–85%），一致性哈希约 20%（12%–30%）。<strong>两者迁移量级分别接近 N/(N+1) 与 1/(N+1)。</strong></li>
+    <li><strong>修平环。</strong>一致性哈希下把虚拟节点从 1 调到 150 → 最大负载/平均严格下降，150 时低于 1.30。<strong>一致性哈希天然不均匀，虚拟节点是必需品。</strong></li>
+    <li><strong>注入热点。</strong>把节点数设为 5，打开「注入热点 key」，分别观察取模与一致性哈希 → 两种模式的最热分片/平均都超过 2。<strong>分片解决容量，不解决热点；热点要靠第 5 章的击穿处方与打散。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->

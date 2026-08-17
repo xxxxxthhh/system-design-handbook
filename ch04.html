@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 章 · 上缓存——以及你签下的一致性契约 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="level1.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch05.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 2 · 缓存与流量 · 第 4 章</div>
+    <h1>上缓存<br>以及你签下的一致性契约</h1>
+    <p class="h1-sub">Redis 把数据库读压力从红线拉回安全区，两周后却把一张旧价格牢牢守在用户面前。缓存不是一份免费副本；从写入那刻起，你就欠下了让两份数据重新相遇的账。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">04 · 1 值班现场</span>16:40，运营改了价格，页面纹丝不动</h2>
+
+<p class="lead">创业第 9 个月，「秒抢」累计用户约 5 万。公司 25 人，后端 5 人。数据库读压力连续一周逼近红线，团队刚把演出详情接入 Redis；上线两周，命中率漂亮得让每个人都松了口气。周四 16:40，运营却抱着电脑冲进开发区：「票价改了二十分钟，用户还在按旧价下单。」</p>
+
+<div class="pager" aria-label="P1 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>客服聚合告警 · P1 · 触发于 16:40:22</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] show-price mismatch 工单 <span class="a">327</span>，10 分钟内持续增加<br>
+[<span class="a">WARNING</span>] &nbsp;show:8842 页面价格 <span class="a">¥580</span>，DB 当前值 <span class="t">¥680</span><br>
+[<span class="g">INFO</span>] &nbsp;&nbsp;&nbsp;&nbsp;admin price update 返回 200，DB affected_rows=1<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">运营群 16:39：</span><br>
+<span class="t">「后台已经显示 680，为什么用户端还是 580？」</span>
+  </div>
+</div>
+
+<p>阿凯把详情接口的四张卡片投到屏幕上。没有 5xx，没有慢查询，缓存命中率甚至比昨天更好——正因为它稳定命中，旧值才被稳定地交付给每个用户。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">缓存命中率</div>
+    <div class="v">99.4%</div>
+    <div class="d down">● 服务稳定</div>
+  </div>
+  <div class="metric">
+    <div class="k">该 key 读 QPS</div>
+    <div class="v">5,000</div>
+    <div class="d up">▲ 首页推荐位</div>
+  </div>
+  <div class="metric">
+    <div class="k">DB 价格</div>
+    <div class="v">¥680</div>
+    <div class="d down">● 16:20 已提交</div>
+  </div>
+  <div class="metric">
+    <div class="k">缓存价格 / TTL</div>
+    <div class="v">¥580 / 19h</div>
+    <div class="d warn">● 写路径未失效</div>
+  </div>
+</div>
+
+<p>读路径是标准 cache-aside：先查缓存，miss 才查 DB 并回填。运营后台的写路径却只更新了数据库，没有删除或更新 <code>show:8842</code>。于是 99.4% 的高命中率不再是好消息，它说明 5,000 次/秒的请求几乎都绕过了已经正确的 DB。</p>
+
+<p>你还看到这个 key 剩余 TTL 19 小时。等自然过期不是修复，是让错误价格继续售卖。此刻必须先把错误值从读路径摘掉，同时避免一次全量清缓存把下一章的事故提前召来。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 16:42。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    执行 FLUSHALL，清空 Redis，保证旧价格不再存在
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    让运营在后台再把 ¥680 提交一次
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    核对 DB 后只删除 show:8842，并让一个受控请求回填新值
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    把详情缓存 TTL 从 24 小时统一缩到 5 分钟
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：精准摘掉错误副本。</b>
+      DB 已确认是 ¥680，删除单个 key 后让一个受控请求回源，能在秒级恢复正确价格；范围只覆盖事故 key，不会把正常缓存一起变冷。随后再修写路径，避免下一次更新继续漏删。
+    </p>
+    <p>
+      <b class="bad">A 的问题是爆炸半径。</b>
+      清空整集群确实会带走旧价格，也会带走每个健康 key。下一秒大量 miss 会一起砸向 DB；第 5 章会给这种“为修一个 key 而清空全部缓存”的后果正式命名。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      写路径仍只改 DB，再提交一次只是把正确值重复写回同一处；缓存继续命中 ¥580，运营还可能误以为后台操作成功等于用户已经看到。重复动作没有触碰故障点。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      缩短 TTL 可以限制未来脏值的寿命，却不会主动删除当前剩余 19 小时的 key；统一短 TTL 还会提高回源频率。先精准止血，再按数据新鲜度设计 TTL。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">04 · 2 原理</span>两份数据之间，每个窗口都要付费</h2>
+
+<p>缓存把读请求从数据库搬到内存，但写入后会出现两个事实源的短暂错位：DB 已经是新值，缓存仍是旧值；或者缓存先变，DB 还没完成。这个窗口再短，只要热点 key 的 QPS 足够高，错误就会被批量交付。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+不一致窗口内的错误读次数 ≈ 窗口时长 × 该 key 读 QPS
+  </div>
+</div>
+
+<p>把一个看似很小的窗口代进去：数据库更新完成后，应用过了 200ms 才删除缓存；该 key 正以 5,000 QPS 被读取。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">不一致窗口</div>
+    <div class="v" style="color:var(--amber)">200ms</div>
+    <div class="d">即 0.2 秒</div>
+  </div>
+  <div class="metric">
+    <div class="k">热点读 QPS</div>
+    <div class="v" style="color:var(--teal)">5,000</div>
+    <div class="d">次 / 秒</div>
+  </div>
+  <div class="metric">
+    <div class="k">错误读</div>
+    <div class="v" style="color:var(--red)">约 1,000</div>
+    <div class="d">0.2 × 5,000</div>
+  </div>
+  <div class="metric">
+    <div class="k">若窗口 2s</div>
+    <div class="v" style="color:var(--red)">约 10,000</div>
+    <div class="d">窗口放大 10 倍</div>
+  </div>
+</div>
+
+<p><strong>200ms × 5,000 QPS = 约 1,000 次脏读。</strong>这就是缓存一致性最反直觉的账：毫秒级窗口在人类感知里很短，在高 QPS 下却足够复制一千次错误。讨论方案时不能只说“最终会一致”，还要写清窗口多长、窗口内谁会读错、读错代价是什么。</p>
+
+<p>常见的四种读写模式，区别不在名字，而在谁负责填缓存、谁负责把写入持久化：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>模式</th>
+        <th>读路径</th>
+        <th>写路径</th>
+        <th>主要账单</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>cache-aside</strong></td>
+        <td>应用先读缓存；miss 后读 DB 并回填</td>
+        <td>应用写 DB，再更新或删除缓存</td>
+        <td>应用掌握业务语义，但双写顺序与失败补偿由应用承担</td>
+      </tr>
+      <tr>
+        <td><strong>read-through</strong></td>
+        <td>应用只读缓存；缓存组件在 miss 时加载 DB</td>
+        <td>通常仍需配套写策略</td>
+        <td>读逻辑集中，但缓存层要理解加载、错误与回源保护</td>
+      </tr>
+      <tr>
+        <td><strong>write-through</strong></td>
+        <td>读缓存即可获得已同步值</td>
+        <td>写缓存，缓存同步写 DB 后再确认</td>
+        <td>一致性路径集中，写延迟增加，缓存成为写入关键依赖</td>
+      </tr>
+      <tr>
+        <td><strong>write-behind</strong></td>
+        <td>读到缓存中的新值</td>
+        <td>缓存先确认，随后异步批量落 DB</td>
+        <td>吞吐高，但缓存故障、乱序与落库失败可能造成数据损失或回退</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>「秒抢」当前用 cache-aside，因为应用最清楚票价、场次状态和展示信息的读错代价。但自由也意味着责任：写 DB 成功、删缓存失败怎么办？并发读恰好在删缓存后、DB 提交前回填旧值怎么办？每一种顺序都要写失败分支，不能只画两根顺利的箭头。</p>
+
+<div class="kicker">缓存一致性不是追求某个动作“原子般优雅”，而是把错误窗口、失败补偿和业务代价写成契约。没有这份契约，高命中率只会更高效地交付旧数据。</div>
+
+<p>下一章，也就是第 5 章，会处理缓存不命中时的三种流量死法；本章提醒你，缓存一直命中也可能出事。库存则更苛刻：第 10 章会说明为什么库存这个 key 连短暂旧值都可能换来超卖，今天这些通用方案届时要重新算账。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">04 · 3 病历卡</span>大盘全绿，工单却知道真相</h2>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>缓存与 DB 双写不一致</h3>
+    <span class="case-no">病历卡 No.03</span>
+  </div>
+  <div class="case-alias">Cache / DB Dual-write Inconsistency · 两份值在失败窗口里分叉</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">一次业务更新要触碰 DB 与缓存两个独立系统，中间没有共同事务。某一步失败、超时或被并发读穿插后，一边保存新值，另一边继续提供旧值；高命中率会让错误绕开权威 DB。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁▁▁▁</span>　无症状型——监控上看不见，只有工单。接口成功率、缓存命中率和 DB 延迟都可能正常；对账、抽样比对或用户投诉才暴露同一 key 的值分叉。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">cache-aside 写 DB 后漏删缓存；更新缓存成功但 DB 回滚；删除缓存与提交 DB 被并发读穿插；消息失效通知丢失；超长 TTL 让脏值长期存活。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>先定义权威源</strong>：明确以 DB 还是缓存为准；② <strong>缩短错误窗口</strong>：写 DB 后删除缓存并对失败重试；③ <strong>可观测对账</strong>：抽样比较版本号和值；④ <strong>幂等失效事件</strong>：让漏掉的一次删除能够补发，而不是静默失联。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」运营将场次价格从 ¥580 改为 ¥680，后台写 DB 成功却漏删缓存；热点 key 以 5,000 QPS 持续命中旧值，监控全绿，直到 327 张客服工单把双写裂缝照出来。</div>
+    </div>
+  </div>
+</div>
+
+<p>这张卡最难记的地方，是它没有尖峰：<span class="sym">▁▁▁▁▁</span>。因此要主动制造“症状”——记录缓存值版本，抽样读取 DB 对比，对关键字段做业务对账。没有对账的双写不一致，可能在 TTL 到期后悄悄消失，也可能在用户账单上留下永久后果。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">04 · 5 权衡</span>更新缓存，还是删除缓存</h2>
+
+<p>写 DB 成功后，你要决定如何处理缓存。更新能让下一次读直接拿到新值，删除能让下一次读从权威源重建；版本化 key 则用新名字切走旧值。三个方案都成立，但失败窗口、读写比例和实现成本不同。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>场次详情更新后，缓存应该怎么处理？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    写 DB 后直接更新缓存为新值
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    写 DB 后删除缓存，让下一次读回填
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    版本化 key：写入新版本，再切换当前版本指针
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 更新缓存</b>：写后下一次读无需回源，新鲜值立即可用，热点不会突然 miss。
+      <strong>账单：</strong>应用要准确重建完整缓存对象；并发写可能把旧计算结果覆盖新值，DB 成功而缓存更新失败仍需补偿。适合对象简单、写入口收敛、更新后不能承受回源尖峰的场景。
+    </p>
+    <p>
+      <b class="mid">B · 删除缓存</b>：不在写路径重复拼装数据，下一次读从 DB 获取权威快照，逻辑较简单。
+      <strong>账单：</strong>删除后的首个读要付回源延迟；热点并发 miss 需要互斥回源，删缓存失败也要重试。适合读多写少、缓存对象由多表组合、能做好回源保护的场景。
+    </p>
+    <p>
+      <b class="mid">C · 版本化 key</b>：新旧版本可以并存，切换与回滚清晰，读者不会撞上半成品。
+      <strong>账单：</strong>需要版本指针、旧版本回收和跨 key 原子切换设计，内存占用与运维复杂度更高。适合大对象发布、配置批次切换、需要快速回滚的场景。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：普通场次详情采用 <strong>B</strong>——DB 更新成功后删除缓存，删除失败进入幂等重试队列；热点 key 加互斥回源。理由是详情由多张表拼装，写路径直接更新容易漏字段，而读多写少让一次受控回源更划算。库存 key 不套用这个结论，第 10 章会单独处理它的强约束。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">04 · 6 复盘</span>那张 ¥580 后来怎么消失了</h2>
+
+<p>回放 16:40 的正确剧本——先恢复价格事实，再修复写路径，最后补上监控看不见的那只眼睛：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">16:42</span>
+    <p><strong>确认权威值。</strong>核对 DB 事务、后台审计记录与票价审批单，确认 ¥680 才是当前价格；暂停该场次新下单 30 秒，避免继续按错误展示成交。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">16:43</span>
+    <p><strong>精准失效。</strong>只删除 <code>show:8842</code>，用一个受控请求回填并比对版本。用户页在 2 秒内显示 ¥680，价格不一致新增工单停止。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">16:49</span>
+    <p><strong>补写路径。</strong>后台改为 DB 提交成功后发出幂等失效任务；删除失败自动重试并告警。连续修改三次测试价，缓存版本均在 120ms 内追上。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">17:08</span>
+    <p><strong>补业务观测。</strong>对价格、开售状态等关键字段做缓存/DB 抽样比对，告警不再只看命中率。回溯审计确认受影响订单，交由客服按差价规则处理。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>先定义哪份数据说了算。</strong>没有权威源，补偿程序只是在两份值之间猜；对「秒抢」详情，DB 是事实，缓存是可重建副本。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>高命中率不是正确率。</strong>缓存可以稳定、快速、低延迟地返回错误值。关键业务要监控版本与内容，而不只监控性能。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>为第二步失败准备补偿。</strong>双写之间没有共同事务时，删除失败、消息丢失和进程崩溃都要有幂等重试与对账兜底。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">04 · 7 自测</span>监控全绿时，你还会怀疑缓存吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">接口成功率、延迟和缓存命中率都平稳，曲线呈 <span class="sym">▁▁▁▁▁</span>；用户却持续报告页面价格与后台不同。最可能是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good">
+      <span class="tag">A</span>
+      缓存与 DB 双写不一致
+    </button>
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">B</span>
+      缓存雪崩
+    </button>
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">C</span>
+      连接池耗尽
+    </button>
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">D</span>
+      主库 CPU 打满
+    </button>
+  </div>
+  <div class="verdict" id="v-q1">
+    <p>
+      <b class="good">A。</b>
+      No.03 的记忆钩子正是「无症状，只有工单」。B 很诱人，因为它也与缓存有关，但雪崩会让命中率断崖下跌、DB 流量阶跃上升；题中性能指标全稳，说明问题在值的正确性而非可用性。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 窗口算术</h3>
+  <p class="stem">缓存与 DB 不一致 200ms，该 key 读取 5,000 QPS。窗口内大约会产生多少次错误读？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">A</span>
+      约 25 次
+    </button>
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">B</span>
+      约 200 次
+    </button>
+    <button class="opt" data-q="q2" data-k="good">
+      <span class="tag">C</span>
+      约 1,000 次
+    </button>
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">D</span>
+      约 5,000 次
+    </button>
+  </div>
+  <div class="verdict" id="v-q2">
+    <p>
+      <b class="good">C。</b>
+      200ms 是 0.2 秒，<code>0.2 × 5,000 = 1,000</code>。D 是最诱人的错误项，它忘了窗口只有一秒的五分之一；B 则把毫秒数直接当成请求数，没有乘读 QPS。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 模式辨认</h3>
+  <p class="stem">应用只向缓存写入，缓存确认后稍后批量落 DB。这个模式是什么，主要风险是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">A</span>
+      read-through；风险是每次都读 DB
+    </button>
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">B</span>
+      write-through；风险是没有缓存命中
+    </button>
+    <button class="opt" data-q="q3" data-k="good">
+      <span class="tag">C</span>
+      write-behind；风险是未落库数据丢失或乱序
+    </button>
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">D</span>
+      cache-aside；风险是缓存不能删除
+    </button>
+  </div>
+  <div class="verdict" id="v-q3">
+    <p>
+      <b class="good">C。</b>
+      先在缓存确认、后异步持久化就是 write-behind。B 很诱人，因为名字里也有 write，但 write-through 要等同步写 DB 完成才确认；它牺牲写延迟，换取更直接的持久化路径。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 顺序陷阱</h3>
+  <p class="stem">cache-aside 更新时采用「先删缓存，再写 DB」。并发读恰好夹在两步之间，可能发生什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">A</span>
+      并发读会自动等待 DB 提交
+    </button>
+    <button class="opt" data-q="q4" data-k="good">
+      <span class="tag">B</span>
+      并发读从 DB 读到旧值并回填，写完成后缓存仍旧
+    </button>
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">C</span>
+      DB 会拒绝本次写入
+    </button>
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">D</span>
+      缓存和 DB 会加入同一事务
+    </button>
+  </div>
+  <div class="verdict" id="v-q4">
+    <p>
+      <b class="good">B。</b>
+      删除后、DB 新值提交前，读 miss 会从 DB 拿旧值并回填；随后写 DB 完成，却没有第二次失效动作。A 是诱人的“数据库会替我排好序”直觉，但缓存回填不受该写事务保护。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「缓存一致性方案怎么设计？」</b>
+    <span class="ans">答题骨架：先定权威源与可接受窗口 → 选 cache-aside 等模式 → 写顺序与失败补偿 → 热点回源保护 → 版本比对与业务对账。</span>
+  </div>
+  <div class="iq">
+    <b>「为什么先删缓存再写库也有坑？」</b>
+    <span class="ans">答题骨架：画并发时序 → 删除后读 miss → 读到旧 DB 值并回填 → DB 新值提交 → 缓存遗留旧值 → 给出二次失效或改顺序的账单。</span>
+  </div>
+  <div class="iq">
+    <b>「延迟双删值不值？」</b>
+    <span class="ans">答题骨架：它缩小特定并发窗口 → 延迟长度依赖读耗时与复制延迟 → 第二次删除仍可能失败 → 不能替代重试和对账。反直觉加分点：先量错误窗口，再决定是否加复杂度。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="level1.html">← 实战关卡 1 · 数据库生死演练</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.03 已收录于附录图鉴</a></span>
+    <span><a href="ch05.html">第 5 章 · 缓存三兄弟——穿透、击穿、雪崩 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

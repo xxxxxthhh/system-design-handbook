@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>系统是被打出来的 · 系统设计实战手册</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar"><span><b>系统是被打出来的</b> · 系统设计实战手册</span><nav aria-label="章节导航"><a href="#" aria-disabled="true">← 上一章</a><a href="index.html">目录</a><a href="ch01.html">开始阅读 →</a></nav></div>
+  <div class="chapter-head">
+    <div class="eyebrow">目录 · 导读</div>
+    <h1>系统是被打出来的</h1>
+    <p class="h1-sub">系统不是设计出来的，是被流量打出来的。这本书是系统设计的飞行模拟器——生产环境不给你的练习机会，这里管够。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 主张 ================= -->
+<h2><span class="sec">导读 · 1</span>为什么看书学不会系统设计</h2>
+
+<p class="lead">你读过那些经典。你知道 CAP，能背出一致性哈希的原理，甚至能画出一张像模像样的秒杀架构图。然后线上出事了，凌晨两点，你盯着监控大盘，<strong>不知道第一个动作该做什么。</strong></p>
+
+<p>这不是你的错，也不是书的错。问题出在系统设计这门手艺的性质上：<strong>它的知识是陈述性的，它的能力是经历性的。</strong></p>
+
+<p>你可以在一小时内读完"缓存雪崩"的定义、成因和三种处方。但你无法通过阅读获得这些东西：</p>
+
+<ul style="margin:16px 0 16px 24px">
+  <li>凌晨两点看到命中率从 98% 掉到 2% 时，<strong>那种想先重启服务的冲动</strong>——以及知道它是错的。</li>
+  <li>在"扩容"和"限流"之间选择时，<strong>对时间的直觉</strong>：扩容要几分钟，而系统正在以秒恶化。</li>
+  <li>重启了数据库、它三秒后又被打死时，<strong>意识到自己陷进了一个循环</strong>。</li>
+</ul>
+
+<p>这些是<em>经历</em>。而绝大多数工程师的问题在于：<strong>真实工作根本不提供这些经历。</strong>你的系统可能三年不出一次 P0；就算出了，处置的也多半是更资深的人；等你终于成为那个人，你的第一次实战就是一次真实的事故。</p>
+
+<div class="kicker">飞行员不是靠飞真飞机学会处理引擎失火的。他们在模拟器里失火过几百次，所以真的失火时，手会先于脑子动起来。<br><br><strong>系统设计没有模拟器——这本书想当那个模拟器。</strong></div>
+
+<p>所以这本书的组织方式和教科书相反。它不按知识点排列，<strong>按挨打的顺序排列</strong>：一个虚构的抢票平台「秒抢」，从 0 到亿级用户，每一章是它遭遇的一次真实形态的危机。你不是旁观者——<strong>全书用第二人称，你就是那个 on-call 的工程师。</strong></p>
+
+<!-- ================= 秒抢设定 ================= -->
+<h2><span class="sec">导读 · 2</span>你的角色设定</h2>
+
+<div class="howto">
+  <div class="h"><div class="hn">你是谁</div><div class="ht">第 3 号员工</div><div class="hd">「秒抢」的后端工程师。第 1 章入职时公司只有 3 个人，你是唯一的后端。第 16 章收官时公司 300 人，而你已经不需要靠运气值班了。</div></div>
+  <div class="h"><div class="hn">「秒抢」是什么</div><div class="ht">一个抢票平台</div><div class="hd">卖演出票。选它是因为抢票业务把系统设计的所有痛点压缩到了极致：<strong>流量是一根针，库存不能超卖，用户全在同一秒到达。</strong></div></div>
+  <div class="h"><div class="hn">时间跨度</div><div class="ht">6 年，0 → 1.2 亿用户</div><div class="hd">四个 PART 对应四个数量级：单机时代（0→1 万）、缓存与流量（→100 万）、分布式深水区（→1000 万）、高可用与多活（→亿）。</div></div>
+  <div class="h"><div class="hn">你会挨多少打</div><div class="ht">16 章 + 4 个真实事故</div><div class="hd">16 次「秒抢」的内部危机，外加 4 个改编自官方公开复盘的<strong>真实工业事故</strong>——GitLab、AWS、Knight Capital、GitHub。</div></div>
+</div>
+
+<!-- ================= 四机制 ================= -->
+<h2><span class="sec">导读 · 3</span>怎么用这本书：四个机制</h2>
+
+<p>每一章都由四类东西驱动。它们不是排版花样，各自解决一个具体的学习问题。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>机制</th><th>长什么样</th><th>它解决什么问题</th><th>怎么用</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>① 值班现场<br>与决策点</b></td>
+        <td>一段告警终端 + 几张指标卡，然后是一个<strong>四选一的决策点</strong>，点击揭晓判词</td>
+        <td>你缺的不是知识，是<strong>在信息不全、时间紧迫时做判断</strong>的经历</td>
+        <td><strong>先自己选，再看判词。</strong>四个选项都是真实工程师会做的动作，判词会告诉你为什么那三个是错的——尤其是最诱人的那个</td>
+      </tr>
+      <tr>
+        <td><b>② 病历卡</b></td>
+        <td>五行固定结构：<em>机理 / 症状 / 易发场景 / 处方 / 案例</em>。症状行带一个曲线形状符号</td>
+        <td>故障的名字很多，<strong>但形状只有几种</strong>。诊断能力比记忆处方重要得多</td>
+        <td>重点看<strong>症状行的形状符号</strong>。全书 17 张卡按形状分组收进<a href="appendix-cards.html">附录 A 图鉴</a>，值班时可当急诊索引</td>
+      </tr>
+      <tr>
+        <td><b>③ 模拟器</b></td>
+        <td>浏览器里跑的实时模型，带滑块、开关和监控图。配一份<strong>🧪 实验清单</strong></td>
+        <td>「重启救不活雪崩」这种事，<strong>讲一百遍不如你自己把它玩坏一次</strong></td>
+        <td><strong>一定要按实验清单的顺序做。</strong>每个实验对应一个明确的教学结论，顺序本身是设计过的</td>
+      </tr>
+      <tr>
+        <td><b>④ 权衡题</b></td>
+        <td>决策点 D2。和自测题的区别是：<strong>所有选项都是对的</strong></td>
+        <td>真实架构决策没有标准答案，<strong>只有账单</strong>。工程师的成熟度体现在能说清代价</td>
+        <td>选之前先问自己"我愿意付哪一份账单"，再看每个选项的代价分析和「秒抢」的选择及理由</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>此外每章结尾有 <strong>4 道自测题</strong>（必含一道看形状诊断、一道数字计算）和 <strong>3 个面试映射追问</strong>。全书的面试题汇总在<a href="appendix-interview.html">附录 B</a>。</p>
+
+<div class="kicker"><strong>关于模拟器的一个承诺：</strong>正文里声称的每一个实验现象，都先用无头模型测试跑过断言才写进书里。模型跑不出来的现象，我们改模型或改说法，不上线与模型不符的文字。</div>
+
+<!-- ================= 阅读路径 ================= -->
+<h2><span class="sec">导读 · 4</span>两条阅读路径</h2>
+
+<div class="howto">
+  <div class="h"><div class="hn">路径一 · 顺读</div><div class="ht">跟着「秒抢」长大</div><div class="hd">从第 1 章读到第 16 章。每一章的危机都由上一章的解法埋下——<strong>缓存是为了解决第 3 章的读压力，而它在第 5 章杀了你</strong>。顺读能获得完整的因果链，这是本书的主要设计。<br><br><strong>适合：</strong>系统性补齐能力、准备面试、想理解"为什么架构会长成那样"。</div></div>
+  <div class="h"><div class="hn">路径二 · 急查</div><div class="ht">当急诊手册用</div><div class="hd">直接打开<a href="appendix-cards.html">附录 A 病历卡图鉴</a>，<strong>按你在监控大盘上看到的曲线形状</strong>找到对应分组，再顺着卡片跳到定义它的章节。<br><br><strong>适合：</strong>正在值班、正在排障、或者刚被问住了一个问题。</div></div>
+</div>
+
+<p>如果你只有一个下午：读<strong>第 5 章</strong>（缓存三兄弟，把模拟器三个实验做完）和<strong>第 12 章</strong>（秒杀专章，前半书的集大成）。这两章能让你判断这本书值不值得读完。</p>
+
+<!-- ================= 目录 ================= -->
+<h2><span class="sec">导读 · 5</span>目录</h2>
+
+<div class="toc">
+
+<div class="toc-part">PART 1 · 单机时代 · 0 → 1 万用户</div>
+
+<a class="toc-item" href="ch01.html">
+  <div class="toc-num">第 1 章</div>
+  <div><div class="toc-t">第一次卖票——一个单体的诞生</div>
+  <div class="toc-d">三个人，两周，一个 MVP。容量估算三步法，以及全书的基线架构图——后面十五章都在改它。</div>
+  <div class="toc-tags"><span class="tag-pill">容量估算</span><span class="tag-pill">基线架构图</span></div></div>
+</a>
+
+<a class="toc-item" href="ch02.html">
+  <div class="toc-num">第 2 章</div>
+  <div><div class="toc-t">第一次宕机——连接池耗尽之夜</div>
+  <div class="toc-d">深夜 502。利用率不是效率指标，是风险指标；P99 在利用率逼近 100% 时是怎么起飞的。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.01</span><span class="tag-pill sim">Sim-1 排队论</span></div></div>
+</a>
+
+<a class="toc-item" href="ch03.html">
+  <div class="toc-num">第 3 章</div>
+  <div><div class="toc-t">读写分离——以及复制延迟挖的坑</div>
+  <div class="toc-d">用户付了钱，订单页说「不存在」。读写分离没有消灭一致性问题，它把问题从"有没有"变成了"多久"。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.02</span></div></div>
+</a>
+
+<a class="toc-item level" href="level1.html">
+  <div class="toc-num">关卡一</div>
+  <div><div class="toc-t">🔥 GitLab 2017：救命的是一份临时快照</div>
+  <div class="toc-d">一位工程师在错误的服务器上清空了数据目录。真正的教材是接下来两小时——五条恢复路径逐一揭牌，最后救场的是一份为负载测试临时打的快照。</div>
+  <div class="toc-tags"><span class="tag-pill">真实事故</span><span class="tag-pill">官方复盘改编</span><span class="tag-pill">3 个决策点</span></div></div>
+</a>
+
+<div class="toc-part">PART 2 · 缓存与流量 · 1 万 → 100 万用户</div>
+
+<a class="toc-item" href="ch04.html">
+  <div class="toc-num">第 4 章</div>
+  <div><div class="toc-t">上缓存——以及你签下的一致性契约</div>
+  <div class="toc-d">缓存不是优化，是契约。四种缓存模式，以及"先更新库还是先删缓存"这个问题为什么没有干净的答案。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.03</span></div></div>
+</a>
+
+<a class="toc-item" href="ch05.html">
+  <div class="toc-num">第 5 章</div>
+  <div><div class="toc-t">缓存三兄弟——穿透、击穿、雪崩</div>
+  <div class="toc-d">02:47，命中率 2%，数据库正在被 40 倍流量冲刷。三种死法，三张病历，以及一个能让你亲手把系统玩坏的模拟器。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.04–06</span><span class="tag-pill sim">Sim-2 缓存雪崩</span></div></div>
+</a>
+
+<a class="toc-item" href="ch06.html">
+  <div class="toc-num">第 6 章</div>
+  <div><div class="toc-t">限流与降级——学会说「不」</div>
+  <div class="toc-d">流量瞬间 5 倍。限流不是拒绝用户，是选择先拒绝谁；降级的层级设计决定你保住什么。</div>
+  <div class="toc-tags"><span class="tag-pill sim">Sim-3 限流算法对比</span></div></div>
+</a>
+
+<a class="toc-item" href="ch07.html">
+  <div class="toc-num">第 7 章</div>
+  <div><div class="toc-t">重试风暴与级联故障——好心办坏事</div>
+  <div class="toc-d">一个下游超时，五分钟后整个平台瘫痪——没有任何组件真正坏了。3 层 × 3 次 = 27 倍的那道乘法。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.07–09</span><span class="tag-pill sim">Sim-4 重试风暴</span></div></div>
+</a>
+
+<a class="toc-item level" href="level2.html">
+  <div class="toc-num">关卡二</div>
+  <div><div class="toc-t">🔥 AWS S3 2017：一个参数与四个小时</div>
+  <div class="toc-d">获授权的人、按既有手册、常规操作——四个限定词全部成立，事故照样发生。这一关讲当"小心"失效之后系统还剩什么。</div>
+  <div class="toc-tags"><span class="tag-pill">真实事故</span><span class="tag-pill">官方复盘改编</span><span class="tag-pill">3 个决策点</span></div></div>
+</a>
+
+<div class="toc-part">PART 3 · 分布式深水区 · 100 万 → 1000 万用户</div>
+
+<a class="toc-item" href="ch08.html">
+  <div class="toc-num">第 8 章</div>
+  <div><div class="toc-t">分库分表——以及热点分片</div>
+  <div class="toc-d">订单表破亿。分完之后，顶流场次又把单个分片打爆——分片解决容量，不解决热点。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.10</span><span class="tag-pill sim">Sim-5 一致性哈希</span></div></div>
+</a>
+
+<a class="toc-item" href="ch09.html">
+  <div class="toc-num">第 9 章</div>
+  <div><div class="toc-t">消息队列——削峰填谷</div>
+  <div class="toc-d">半夜的积压告警。消费速率只差生产速率 5%，积压也会线性上涨到天亮——它不会自愈。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.11–12</span><span class="tag-pill sim">Sim-6 积压水位</span></div></div>
+</a>
+
+<a class="toc-item" href="ch10.html">
+  <div class="toc-num">第 10 章</div>
+  <div><div class="toc-t">超卖！——库存一致性</div>
+  <div class="toc-d">热门场次多卖出 300 张票，法务和客服同时找上门。全书压力最高的一章，也是第 5 章那个钩子的回收点。</div>
+  <div class="toc-tags"><span class="tag-pill">综合应用</span><span class="tag-pill">必考题</span></div></div>
+</a>
+
+<a class="toc-item" href="ch11.html">
+  <div class="toc-num">第 11 章</div>
+  <div><div class="toc-t">幂等与分布式锁——用户狂点了八次购买</div>
+  <div class="toc-d">网络抖动 + 用户狂点 + 网关重试，同一用户产生 8 笔订单。分布式锁的四种死法。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.13</span></div></div>
+</a>
+
+<a class="toc-item" href="ch12.html">
+  <div class="toc-num">第 12 章</div>
+  <div><div class="toc-t">秒杀架构专章——瞬时百倍流量的完整作战方案</div>
+  <div class="toc-d">顶流开票 D-7，你是技术负责人，要交一份完整作战方案。前半书集大成，也是「设计一个秒杀系统」的完整答案。</div>
+  <div class="toc-tags"><span class="tag-pill">全景架构图</span><span class="tag-pill">预案表</span><span class="tag-pill">面试重点</span></div></div>
+</a>
+
+<a class="toc-item level" href="level3.html">
+  <div class="toc-num">关卡三</div>
+  <div><div class="toc-t">🔥 Knight Capital 2012：四十五分钟</div>
+  <div class="toc-d">八台服务器，七台装了新代码。第八台上，一段 2003 年停用、2005 年被改坏、从未重测的代码正在等一个开关。</div>
+  <div class="toc-tags"><span class="tag-pill">真实事故</span><span class="tag-pill">SEC 行政令改编</span><span class="tag-pill">3 个决策点</span></div></div>
+</a>
+
+<div class="toc-part">PART 4 · 高可用与多活 · 1000 万 → 亿级用户</div>
+
+<a class="toc-item" href="ch13.html">
+  <div class="toc-num">第 13 章</div>
+  <div><div class="toc-t">微服务拆分——以及拆分的代价</div>
+  <div class="toc-d">拆之前发布排队三天，拆之后一次跨服务排障花了两周。拆分不降低复杂度，它把复杂度从代码搬到了网络上。</div>
+  <div class="toc-tags"><span class="tag-pill">康威定律</span><span class="tag-pill">何时不该拆</span></div></div>
+</a>
+
+<a class="toc-item" href="ch14.html">
+  <div class="toc-num">第 14 章</div>
+  <div><div class="toc-t">可观测性——看懂凌晨三点的仪表盘</div>
+  <div class="toc-d">一次「什么都没改但整体变慢 15%」的幽灵排查。metrics 告诉你坏了，traces 告诉你哪坏了，logs 告诉你为什么坏。</div>
+  <div class="toc-tags"><span class="tag-pill">RED / USE</span><span class="tag-pill">告警疲劳</span></div></div>
+</a>
+
+<a class="toc-item" href="ch15.html">
+  <div class="toc-num">第 15 章</div>
+  <div><div class="toc-t">异地多活——以及脑裂</div>
+  <div class="toc-d">容灾演练当天，演练变成真故障：两边都认为自己是主。CAP 在机房级别不是理论，是你必须当场做的选择。</div>
+  <div class="toc-tags"><span class="tag-pill card">病历卡 No.14</span><span class="tag-pill">RTO / RPO</span></div></div>
+</a>
+
+<a class="toc-item level" href="level4.html">
+  <div class="toc-num">关卡四</div>
+  <div><div class="toc-t">🔥 GitHub 2018：四十三秒与二十四小时</div>
+  <div class="toc-d">网络断了 43 秒，自动 failover 完全按配置正确执行。然后是 24 小时 11 分的降级——不是修不好，是选择了不快点修好。</div>
+  <div class="toc-tags"><span class="tag-pill">真实事故</span><span class="tag-pill">官方复盘改编</span><span class="tag-pill">3 个决策点</span></div></div>
+</a>
+
+<a class="toc-item" href="ch16.html">
+  <div class="toc-num">第 16 章</div>
+  <div><div class="toc-t">混沌工程与容量规划——主动把系统弄坏</div>
+  <div class="toc-d">全书收官。你主持第一次生产「游戏日」，亲手注入本书出现过的故障。系统是被打出来的，但被打之前，你可以先打它。</div>
+  <div class="toc-tags"><span class="tag-pill">混沌实验</span><span class="tag-pill">容量规划</span><span class="tag-pill">收官</span></div></div>
+</a>
+
+<div class="toc-part">附录</div>
+
+<a class="toc-item" href="appendix-cards.html">
+  <div class="toc-num">附录 A</div>
+  <div><div class="toc-t">病历卡图鉴</div>
+  <div class="toc-d">全书病历卡汇总，按<strong>症状形状</strong>分六组编排——值班时先看大盘上的形状，再对症状文字。含三张正文未出现的卡：灰色故障、亚稳态故障、时钟漂移。</div>
+  <div class="toc-tags"><span class="tag-pill card">急诊索引</span></div></div>
+</a>
+
+<a class="toc-item" href="appendix-interview.html">
+  <div class="toc-num">附录 B</div>
+  <div><div class="toc-t">面试映射总表</div>
+  <div class="toc-d">全书各章的高频追问与答题骨架汇总成一张速查表，附对应章节链接。由脚本从正文派生生成。</div>
+  <div class="toc-tags"><span class="tag-pill">速查表</span></div></div>
+</a>
+
+</div><!-- /toc -->
+
+<!-- ================= 关于事实 ================= -->
+<h2><span class="sec">导读 · 6</span>关于书里的事实</h2>
+
+<p>本书有两类内容，边界很清楚：</p>
+
+<p><strong>「秒抢」的一切都是虚构的</strong>——公司、同事、故障、对话、数字。它是一个教学载体，可以随剧情需要设计，唯一的要求是<em>技术上必须站得住</em>。</p>
+
+<p><strong>四个实战关卡和少数病历卡案例引用真实公司的真实事故</strong>。这部分遵守一套更严的规矩：</p>
+
+<ul style="margin:16px 0 16px 24px">
+  <li>事实<strong>只取自官方原始复盘</strong>（企业官方工程博客、监管机构公开文件），二手文章只提供线索，不作为依据。</li>
+  <li>每个关卡页头都有事实边界声明，正文的事实性陈述<strong>逐句挂来源角标</strong>，页末列出原始文档链接。</li>
+  <li>数字一律带「约」，除非原文给出精确值。</li>
+  <li><strong>不给真实人物编造台词，不出现真实人物姓名，不指名批评任何个人</strong>——与各家官方复盘的 blameless 精神一致。</li>
+  <li>改编只发生在氛围与心理描写上，<strong>不发生在技术事实与决策链上</strong>。</li>
+</ul>
+
+<p>如果你发现书中任何一处真实事故的描述与官方复盘不符，那是错误，不是演绎。</p>
+
+<hr class="thin">
+
+<p style="text-align:center;color:var(--muted)">准备好了就开始。<br>第一章没有故障，只有一个 deadline——但它会画出那张被打了十五次的图。</p>
+
+<p style="text-align:center;margin-top:26px"><a class="btn primary" href="ch01.html" style="display:inline-block;text-decoration:none">第 1 章 · 第一次卖票 →</a></p>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span>《系统是被打出来的》· 系统设计实战手册</span>
+    <span><a href="appendix-cards.html">附录 A 病历卡图鉴</a> · <a href="appendix-interview.html">附录 B 面试映射</a></span>
+    <span><a href="ch01.html">开始阅读 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

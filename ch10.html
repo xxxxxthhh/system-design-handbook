@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 10 章 · 超卖！——库存一致性 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch09.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch11.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 3 · 分布式深水区 · 第 10 章</div>
+    <h1>超卖！<br>库存一致性</h1>
+    <p class="h1-sub">缓存、队列和分片都能替你扛流量，却不能替你回答「最后一张票属于谁」。这一章把并发竞态摊在账本上：多卖是法律与信誉，少卖是收入，二者从来不对称。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">10 · 1 值班现场</span>10:07，法务和客服同时推开门</h2>
+
+<p class="lead">创业第 3 年 5 个月，「秒抢」累计用户约 500 万，公司 190 人，后端 35 人。顶流场次十点开售，三分钟售罄。你刚在群里发出「扛住了」，客服主管把一张表放到你面前：场馆 50,000 个座位，系统却收了 50,300 笔有效付款。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 10:07:26</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] paid-order count <span class="a">50,300</span> &gt; sellable seats 50,000<br>
+[<span class="r">CRITICAL</span>] allocation-unmatched <span class="a">300 orders</span>（无可分配座位）<br>
+[<span class="a">WARNING</span>] &nbsp;inventory reconcile delta <span class="a">−300</span><br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">客服群最新消息：</span><br>
+<span class="t">「已有用户拿着付款凭证要求出票，法务正在会议室等你。」</span>
+  </div>
+</div>
+
+<p>你把库存、订单和支付三本账并排。缓存没有报错，数据库也没有宕机；真正刺眼的是几组彼此都「成功」的数字：</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">场馆可售座位</div>
+    <div class="v">50,000</div>
+    <div class="d">合同确认上限</div>
+  </div>
+  <div class="metric">
+    <div class="k">有效付款订单</div>
+    <div class="v">50,300</div>
+    <div class="d up">▲ 多出 300 张</div>
+  </div>
+  <div class="metric">
+    <div class="k">库存服务成功率</div>
+    <div class="v">99.99%</div>
+    <div class="d warn">● 技术成功不等于账平</div>
+  </div>
+  <div class="metric">
+    <div class="k">读后写冲突窗口</div>
+    <div class="v">18ms</div>
+    <div class="d up">▲ 峰值同库存并发 1,840</div>
+  </div>
+</div>
+
+<p>订单日志很快给出一组最小复现：库存还剩 1 时，请求 A 和 B 都在 10:02:11.204 读到 1；A 在 10:02:11.218 写回 0，B 在 10:02:11.222 也写回 0。两次更新都成功，两笔订单都进入支付，数据库最终库存仍是 0。监控看见的是两个成功事务，业务得到的是一张票卖给两个人。</p>
+
+<p>这不是流量把机器压坏，而是并发把一段非原子逻辑拆开了。现在 300 位用户已经付款，任何一次仓促退款都可能演变成投诉；与此同时，还有渠道订单尚未完成座位分配，差额可能继续扩大。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 10:09。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    把 Redis 库存临时加 300，让已付款订单都能继续出票
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">B</span>
+    关闭该场次销售入口，冻结自动出票；以场馆座位为上限锁定三本账快照
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">C</span>
+    先批量退款最后 300 笔付款，尽快把数量改回 50,000
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    立刻把库存扣减改成分布式锁，发布热修复
+  </button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B 是教科书答案：先冻结事实。</b>关入口阻止差额继续扩大，停自动出票避免把座位重复分给不同订单；锁定库存、订单、支付和渠道快照，才能确认影响集合。先保存证据与业务上限，再决定补票、换场或退款顺序。</p>
+    <p><b class="bad">A 会把事故写进权威账本。</b>Redis 数字加 300 不能让场馆长出 300 个座位，只会把明确的超卖伪装成「库存充足」。技术指标也许变绿，法律义务却增加了。</p>
+    <p><b class="bad">C 的问题是你还不知道哪 300 笔该退。</b>付款时间不等于座位权利排序，渠道保留票、无障碍席和已分配座位都可能改变处置集合。未经核对批量退款，可能退掉已有合法座位的用户，却留下真正无法履约的订单。</p>
+    <p><b class="mid">D 方向可能有用，但救不了现在。</b>热修复只能保护后续请求，无法撤销已经形成的 300 笔付款；故障中直接引入新锁还可能触发第 11 章会讲的过期与误删问题。先停写、对账，再用可证明的原子扣减替换竞态。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">10 · 2 原理</span>最后一张票不能有两个答案</h2>
+
+<p><strong>「可售库存的真相，任何时刻只能有一个持有者。」</strong>这个持有者可以是数据库的一行、Redis 中由 Lua 原子操作的计数器，也可以是按场次串行消费的单一分区；关键不在产品名字，而在同一时刻只有一处能够批准扣减。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+错误做法：读库存 → 在应用里判断 &gt; 0 → 写回库存 − 1<br>
+正确边界：判断与扣减必须是同一个原子动作
+  </div>
+</div>
+
+<p><code>读-改-写</code> 的危险不在每一步，而在三步之间可以插入别的请求。把现场缩成最后一张票：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">初始库存</div>
+    <div class="v">1</div>
+    <div class="d">A、B 同时开始</div>
+  </div>
+  <div class="metric">
+    <div class="k">A 读取 / B 读取</div>
+    <div class="v" style="color:var(--amber)">1 / 1</div>
+    <div class="d">都通过大于 0 判断</div>
+  </div>
+  <div class="metric">
+    <div class="k">A 写回 / B 写回</div>
+    <div class="v" style="color:var(--red)">0 / 0</div>
+    <div class="d">两次更新均成功</div>
+  </div>
+  <div class="metric">
+    <div class="k">业务结果</div>
+    <div class="v" style="color:var(--red)">卖出 2 张</div>
+    <div class="d">实际只有 1 张</div>
+  </div>
+</div>
+
+<p>最终库存 0 看起来完全合法，但成功订单是 2。库存数值本身没有越过下界，所以只监控 <code>stock &lt; 0</code> 抓不到这类覆盖写。必须把「成功扣减次数 + 剩余库存 = 初始可售量」作为对账不变量。</p>
+
+<p>四种常见方案，购买的是不同位置的原子性：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>方案</th>
+        <th>原子边界</th>
+        <th>优点</th>
+        <th>账单与适用条件</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>悲观锁</strong></td>
+        <td>事务中锁住库存行，再读取与扣减</td>
+        <td>语义直观，强一致结果留在 DB</td>
+        <td>热点行串行等待，锁持有时间会放大 P99；适合并发有限、事务短的库存</td>
+      </tr>
+      <tr>
+        <td><strong>乐观锁</strong></td>
+        <td>按版本号条件更新，冲突者重读或失败</td>
+        <td>无长时间阻塞，读多冲突少时吞吐好</td>
+        <td>高冲突场景重试会放大流量；适合冲突概率低、允许显式失败的写入</td>
+      </tr>
+      <tr>
+        <td><strong>DB 原子扣减</strong></td>
+        <td><code>UPDATE ... SET stock=stock-1 WHERE stock&gt;0</code></td>
+        <td>一条语句完成判断与扣减，以影响行数判成功</td>
+        <td>热点仍压在单行，数据库承担入口并发；适合容量能承受、正确性优先的核心账</td>
+      </tr>
+      <tr>
+        <td><strong>Redis + Lua 预扣</strong></td>
+        <td>脚本内检查、扣减、记录预扣凭证</td>
+        <td>内存吞吐高，可在数据库前挡住大流量</td>
+        <td>Redis 与 DB 之间产生新一致性窗口，需要持久化、补偿与对账；适合峰值高且治理成熟的场景</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>DB 原子扣减的数字最容易验算。库存 100 张，1,000 个请求同时执行条件更新：前 100 次各影响 1 行，后 900 次影响 0 行。应用只为影响 1 行的请求创建订单，因此成功数 100、剩余库存 0，不会因为请求并发而出现第 101 个批准。</p>
+
+<p>Redis + Lua 预扣把批准权移到内存层。脚本要同时完成三件事：验证库存大于 0、扣 1、写下与幂等键绑定的预扣凭证。消费者再异步落库；落库失败时，补偿任务凭同一键归还库存。若只扣计数、不留凭证，系统会知道「少了 1」，却不知道该为谁补。</p>
+
+<h3>库存不是一个数字，是一组有方向的状态</h3>
+
+<p>只保存 <code>stock=497</code>，只能回答「还剩多少」，无法回答三笔扣减分别走到了哪一步。可靠的库存链路至少要让每个业务键经历可审计的状态迁移：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>状态</th>
+        <th>它代表什么</th>
+        <th>允许的下一步</th>
+        <th>重复请求怎么处理</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>AVAILABLE</strong></td>
+        <td>配额尚未被任何订单占用</td>
+        <td>原子转为 RESERVED</td>
+        <td>没有预扣凭证，不返回成功</td>
+      </tr>
+      <tr>
+        <td><strong>RESERVED</strong></td>
+        <td>库存已为一个幂等键预留，订单可能仍在落库</td>
+        <td>确认成交或按规则释放</td>
+        <td>同一键返回现有预扣，不再扣第二次</td>
+      </tr>
+      <tr>
+        <td><strong>CONFIRMED</strong></td>
+        <td>订单与支付满足成交条件，库存正式消耗</td>
+        <td>退款时进入独立补偿流程</td>
+        <td>返回第一次确认结果</td>
+      </tr>
+      <tr>
+        <td><strong>RELEASED</strong></td>
+        <td>预扣因超时、取消或落库失败而归还</td>
+        <td>配额回到可售池</td>
+        <td>旧键不可再次把同一凭证确认成交</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>这里的关键不是英文状态名，而是<strong>状态只能沿允许的边前进</strong>。若一条迟到的「订单成功」消息能把 RELEASED 直接改成 CONFIRMED，而这份库存已经卖给别人，补偿流程就亲手制造了超卖。解决办法是版本号或 fencing token：只有携带当前预扣版本的处理者才能推进状态，旧结果被记录但不能覆盖新裁决。</p>
+
+<p>用 1,000 张配额做一次验算：Lua 产生 1,000 条 RESERVED 凭证，消费者确认 980 条，取消 15 条，另有 5 条超时未知。此时不能把「剩余库存」直接写成 20；能立即释放的是 15，另外 5 条仍占用，直到按幂等键确认 DB 中没有订单。<strong>这里最容易犯的错，是把「凭证曾经处于什么状态」和「槽位现在被谁占着」写进同一个等式</strong>——RELEASED 的凭证是历史事实，它对应的槽位已经变回可售，再单独加一次就会双计数。所以要拆成两条不变量：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+槽位不变量（当下）　初始配额 = CONFIRMED + RESERVED + AVAILABLE<br>
+凭证不变量（历史）　已签发凭证数 = CONFIRMED + RESERVED + RELEASED<br>
+两者的桥：RELEASED 的槽位已经回到 AVAILABLE，<b>不得重复计入</b>
+  </div>
+</div>
+
+<p>代入这 1,000 张：<strong>槽位</strong>为 CONFIRMED 980 + RESERVED 5（超时未知，仍占用）+ AVAILABLE 15 = <strong>1,000</strong>；<strong>凭证</strong>为 CONFIRMED 980 + RESERVED 5 + RELEASED 15 = <strong>1,000</strong> 张已签发。两条等式各自闭合，而「15」只在槽位侧算作可售、在凭证侧算作已释放，<em>不会被加两次</em>。对账脚本要同时跑这两条；只跑一条的对账，正是超卖最爱藏身的地方。</p>
+
+<h3>四个失败窗口，四种不同动作</h3>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>失败窗口</th>
+        <th>调用方知道什么</th>
+        <th>安全动作</th>
+        <th>危险本能</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Lua 执行前超时</td>
+        <td>不知道预扣是否发生</td>
+        <td>用幂等键查询预扣凭证</td>
+        <td>换新键重试，可能扣两次</td>
+      </tr>
+      <tr>
+        <td>预扣成功、消息发送失败</td>
+        <td>有预扣，无落库任务</td>
+        <td>事务外盒或扫描凭证补发</td>
+        <td>静默等待，形成少卖</td>
+      </tr>
+      <tr>
+        <td>DB 提交后确认丢失</td>
+        <td>消费者认为结果未知</td>
+        <td>同一键重试，读取既有订单</td>
+        <td>先归还库存，再重复落库</td>
+      </tr>
+      <tr>
+        <td>取消释放与成功确认并发</td>
+        <td>两条状态转移争同一凭证</td>
+        <td>版本条件更新，只接受当前版本</td>
+        <td>后到者无条件覆盖先到者</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>这张表解释了为什么「加一把分布式锁」不够：锁保护的是一段执行时间，库存正确性还跨越消息投递、数据库提交、超时重试和补偿任务。每个窗口都需要可查询的业务事实与幂等状态转移，而不是靠调用者记住自己刚才做过什么。</p>
+
+<div class="kicker">库存一致性不是让两个副本尽量同步，而是让每一次批准都有可追溯的单一裁决点。缓存可以快，队列可以削峰，最后仍要有一本账能回答：这张票为什么属于这个订单。</div>
+
+<h3>超卖与少卖，不是镜像问题</h3>
+
+<p><strong>超卖</strong>意味着平台收了无法履行的款：退款、补偿、客服、合同责任与用户信任同时发生。它的单次成本可能远高于票价。<strong>少卖</strong>是还有真实座位却显示售罄，主要损失收入与转化；它也严重，但通常可以通过补库存、二次开售或补偿任务修复。</p>
+
+<p>因此库存策略常有意偏向「宁可短时少卖，不让系统批准无法履约的订单」。例如 Redis 预扣成功、DB 落库超时但结果未知时，先把这张库存视为占用，待对账确认后再释放；若立即归还，原请求其实已落库，就可能让同一张票再次出售。这里购买的是安全边界，账单是暂时冻结一部分收入。</p>
+
+<p>第 4 章讲过缓存与 DB 双写不一致：更新顺序只能缩短窗口，不能让两个独立写入自动成为原子事务。库存正是那个读错代价高到不能拿普通 cache-aside 冒险的 key。第 12 章会把预扣、排队、限流与最终落库放进完整秒杀漏斗里。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">10 · 3 病历卡</span>这不是新病，是旧病在同一张票上会诊</h2>
+
+<p>超卖不新增病历卡。它是几张既有卡同时落到高价值状态上的综合题：双写窗口让两本库存账分叉，缓存故障让批准权失控，锁失效则可能让两个持有者同时进入临界区。</p>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.03</span><span class="nm">缓存与 DB 双写不一致</span><span class="sym">▁▁▁▁▁</span>
+  Redis 预扣与 DB 实际库存分属两次写入，任何失败窗口都要靠预扣凭证、补偿和对账收敛。<a href="ch04.html">第 4 章定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.04</span><span class="nm">缓存穿透</span><span class="sym">▁▂▂▃▃▄▄</span>
+  非法场次或伪造库存 key 若次次落到权威存储，会在开票时持续消耗宝贵的扣减容量。<a href="ch05.html">第 5 章回顾 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.05</span><span class="nm">缓存击穿</span><span class="sym">▁▁▁█▁▁▁</span>
+  热门场次库存 key 失效时，并发回源会把本应串行裁决的热点重新砸到数据库。<a href="ch05.html">第 5 章回顾 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.06</span><span class="nm">缓存雪崩</span><span class="sym">███▁▁▁▁</span>
+  大批库存 key 同时失效，会让预扣层退出战斗；此时入口限流必须保护权威库存账。<a href="ch05.html">第 5 章回顾 →</a>
+</div>
+
+<div class="case-ref fwd">
+  <span class="no">病历卡 No.13</span><span class="nm">分布式锁失效</span><span class="sym">▁▁█▁▁</span>
+  锁过期、误删或故障切换会让两个请求同时认为自己持有库存裁决权；不要把锁名当成原子性证明。<a href="ch11.html">第 11 章定义 →</a>
+</div>
+
+<p>这场会诊的共同处方只有一句：先找出批准库存变化的权威点，再把缓存、锁、队列和数据库放到它的前后。若架构图上有两处都能独立回答「还有票」，超卖只是等待一个足够密集的并发窗口。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">10 · 5 权衡</span>库存计数放 DB，还是放 Redis</h2>
+
+<p><strong>第 5 章说过</strong>：库存这个 key 对旧值零容忍，缓存三种过期保护方案都不敢直接拿来当真相。现在钩子收回来——DB 与 Redis 都能持有裁决权，但只能选清楚谁批准、谁跟随。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>顶流开票峰值下，可售库存计数应该放在哪里？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    DB 做权威库存：用原子条件更新批准每次扣减
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    Redis 做预扣裁决：Lua 原子扣减，队列异步落库
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    分层持有：普通场次 DB 直扣，顶流场次独立 Redis 预扣通道
+  </button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · DB 权威库存</b>：事务与订单写入容易放在同一数据边界，审计和恢复路径最直观。<strong>账单：</strong>热点行成为串行瓶颈，峰值前必须用限流和排队把请求压到已验证容量。适合库存量和并发可控、正确性预算高于吞吐预算的场景。</p>
+    <p><b class="mid">B · Redis 预扣裁决</b>：Lua 在内存中完成原子判断与扣减，能把大部分竞争挡在数据库外。<strong>账单：</strong>预扣与落库之间要处理丢消息、重复消费、超时未知和补偿；Redis 故障恢复也必须重建权威状态。适合瞬时流量极高、具备成熟对账与演练能力的场景。</p>
+    <p><b class="mid">C · 分层持有</b>：只为少数顶流场次支付 Redis 预扣的复杂度，长尾库存继续走 DB 原子更新。<strong>账单：</strong>两条路径意味着两套容量、对账和故障手册，场次切换时还要确保裁决权不重叠。适合热点高度集中、平台治理能力足够的业务。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：采用 <strong>C</strong>。普通场次由 DB 原子扣减；顶流场次在开票前把明确配额装入独立 Redis 单元，Lua 预扣同时写凭证，订单事件进入第 9 章的队列异步落库。DB 账与 Redis 预扣账持续对账，故障时默认停止新增批准而不是猜库存。第 12 章会把这条独立通道放进完整漏斗。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">10 · 6 复盘</span>那 300 张票后来怎么处理了</h2>
+
+<p>回放 10:07 之后的正确剧本——先停止新增义务，再锁定事实，最后才修代码与恢复销售：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">10:09</span>
+    <p><strong>冻结入口与出票。</strong>关闭该场次销售，暂停未分配订单的自动出票；有效付款数停在 50,300，差额不再扩大，原始日志和三本账快照完成保全。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:18</span>
+    <p><strong>按座位权利对账。</strong>合并场馆锁座、渠道保留票、订单与支付状态，确认 50,000 笔可履约、300 笔缺少座位；法务、客服和产品据此确定补偿优先级。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:42</span>
+    <p><strong>切换原子扣减。</strong>库存入口改为 DB 条件更新，以影响行数作为批准结果；关闭旧的读后写路径，并用并发回放证明库存 1 时只有一个请求成功。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">12:10</span>
+    <p><strong>逐笔履约与补偿。</strong>客服联系 300 位受影响用户，提供退款与补偿选择；确认账平后才恢复其他场次销售，并启动 Redis 预扣方案的专项设计而非现场冒险上线。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>库存的成功必须由业务不变量证明。</strong>接口成功率、库存非负和数据库健康都可能同时成立；还要核对成功扣减数、剩余库存与初始可售量。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>先冻结义务，再修技术。</strong>超卖时继续销售或自动出票都会增加法律与信誉账单。止血动作是停止新增批准、保存事实，而不是先让监控变绿。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>宁可可解释地少卖，不要不可履约地多卖。</strong>超时未知时先保留预扣，靠对账后释放；把安全偏向写进状态机，别让每个调用方临场猜测。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">10 · 7 自测</span>你能守住最后一张票吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">库存服务成功率和延迟曲线呈 <span class="sym">▁▁▁▁▁</span>，没有技术告警；日终却发现 Redis 预扣数与 DB 订单数相差 27。首先应该联想到什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>No.03 双写不一致，需要沿预扣凭证对账</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>连接池已经阶跃打满</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>没有告警，因此两本账相等</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>只需把 Redis 数字覆盖成 DB 数字</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>平坦曲线却由对账发现差额，正是 No.03 的无症状型。C 很诱人，因为基础设施全绿，但双写窗口可能只影响少数业务记录；D 在没有逐笔凭证时直接覆盖，会掩盖哪些订单应补扣或释放。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 并发算术</h3>
+  <p class="stem">库存只剩 1，50 个请求先同时读到 1，再各自写回 0，并且都据此创建订单。最多产生多少笔超出真实库存的订单？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>0 笔，因为最终库存没有小于 0</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>1 笔</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">C</span>49 笔</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>50 笔</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">C。</b>真实库存允许 1 笔，50 个请求都被非原子逻辑批准，因此超出 49 笔。A 是最危险的误判：覆盖写让最终值保持 0，无法从负库存发现超卖；D 把合法的第一笔也算进了超出量。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 原子扣减</h3>
+  <p class="stem">执行 <code>UPDATE inventory SET stock=stock-1 WHERE show_id=? AND stock&gt;0</code> 后，应用应依据什么决定是否创建订单？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>更新前读到的库存值</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>本次更新的影响行数是否为 1</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>接口调用耗时是否低于 100ms</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>缓存中的剩余库存是否非负</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b>条件判断与扣减已经在一条语句中完成，影响 1 行才代表本请求拿到库存。A 又把判断搬回非原子读路径；D 读取的是另一份可能落后的账；C 只能说明快慢，不能证明获批。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 超时未知</h3>
+  <p class="stem">Redis 预扣成功后，订单落库请求超时，调用方不知道 DB 是否已提交。此时最安全的第一步是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>立即归还库存并让下一位用户购买</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>保留预扣，按幂等键查询与对账后再提交或释放</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>再创建一个新订单号重试</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>把 DB 库存手工加 1</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>超时只表示调用方没拿到结果，不证明事务失败。A 最诱人，却可能在原事务已提交时把同一库存再卖一次；C 换订单号会绕过幂等护栏。保留预扣会短时少卖，但先守住不可履约风险。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「秒杀系统怎么防超卖？」</b>
+    <span class="ans">答题骨架：定义单一库存裁决点 → 拒绝非原子读改写 → DB 条件更新或 Redis Lua → 成功凭证与幂等键 → 队列削峰 → 对账与补偿 → 压测最后一张票。</span>
+  </div>
+  <div class="iq">
+    <b>「预扣库存和实际库存怎么对账？」</b>
+    <span class="ans">答题骨架：初始配额 → 预扣凭证 → 订单落库 → 支付状态 → 取消释放 → 按业务键做差集 → 超时未知先查询再补偿。说明对账不变量与人工处置入口。</span>
+  </div>
+  <div class="iq">
+    <b>「Redis 挂了，库存怎么办？」</b>
+    <span class="ans">答题骨架：先停止新增批准 → 明确 RDB/AOF 与副本恢复边界 → 用已落库订单和预扣凭证重建 → 对账后慢放量。反直觉加分点：库存服务降级应偏向少卖，不能在状态未知时绕过权威账继续收款。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch09.html">← 第 9 章 · 消息队列——削峰填谷</a></span>
+    <span><a href="appendix-cards.html">库存一致性综合复用病历卡 No.03–06 / 13</a></span>
+    <span><a href="ch11.html">第 11 章 · 幂等与分布式锁——用户狂点了八次购买 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 15 章 · 异地多活——以及脑裂 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch14.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="level4.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 4 · 高可用与多活 · 第 15 章</div>
+    <h1>异地多活<br>以及脑裂</h1>
+    <p class="h1-sub">容灾的目标不是让两边都亮着灯，而是在网络断开、时钟分叉和自动切换同时发生时，仍能证明谁有资格写。演练当天，两座机房都宣布自己是主——这份账单叫脑裂。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">15 · 1 值班现场</span>14:07，演练变成了真故障</h2>
+
+<p class="lead">创业第 5 年 10 个月，「秒抢」累计用户约 7000 万，公司 295 人，研发 75 人。周四下午进行第一次机房级容灾演练：计划断开上海与杭州之间的业务链路，验证 5 分钟内切换。14:07，两边的「PRIMARY」指示灯同时亮起。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>Disaster Recovery · P0 · 触发于 14:07:11</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] dual-primary detected：shanghai=<span class="a">WRITABLE</span> / hangzhou=<span class="a">WRITABLE</span><br>
+[<span class="r">CRITICAL</span>] order sequence conflict <span class="a">1,284 keys</span>，仍在增长<br>
+[<span class="a">WARNING</span>] &nbsp;cross-region replication lag <span class="a">unreachable</span><br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">演练控制台：</span><br>
+<span class="t">「两侧自动切换任务均返回：本地多数派成立，已提升为主」</span>
+  </div>
+</div>
+
+<p>演练脚本原本只该切业务流量，却同时触发了两套独立的本地提升逻辑。上海看不见杭州，于是按本地 3 个节点中的 2 个投票成为主；杭州也把自己的 2 个节点临时重配成新成员集，并按 2/2 成为主。固定成员集被拆成两份，每份都给自己发了写入许可证。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">上海写入</div>
+    <div class="v">7,800/s</div>
+    <div class="d up">▲ token 41</div>
+  </div>
+  <div class="metric">
+    <div class="k">杭州写入</div>
+    <div class="v">5,100/s</div>
+    <div class="d up">▲ 本地 epoch 1</div>
+  </div>
+  <div class="metric">
+    <div class="k">冲突订单键</div>
+    <div class="v">1,284</div>
+    <div class="d up">▲ 每秒新增约 160</div>
+  </div>
+  <div class="metric">
+    <div class="k">复制链路</div>
+    <div class="v">双向中断</div>
+    <div class="d warn">● 无共同写入围栏</div>
+  </div>
+</div>
+
+<p>两边都能服务用户，成功率甚至维持在 99% 以上；但同一场次的最后一批库存被各自扣减，同一用户的订单状态也在两边向不同方向推进。现在每多一秒正常流量，就多约 160 个需要人工或规则仲裁的业务键。</p>
+
+<p>这不是「等网络恢复后自动同步」能解决的问题。复制只能传递两个已经发生的事实，不能决定哪个事实有权覆盖另一个。你必须先让至少一边失去写资格，冲突集合才会停止增长。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 14:08。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立即恢复跨城复制，让两边互相同步并自动合并数据
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">B</span>
+    在入口与存储同时围栏写入，暂停杭州写；保全双边日志后确认固定成员集的多数派
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">C</span>
+    保持双写，按各地用户归属继续服务，等演练窗口结束再对账
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    只把 DNS 全量指向上海，不修改杭州存储写权限
+  </button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B 是教科书答案：先恢复单一写入资格。</b>入口停止新请求，存储层再用 token 或只读开关拒绝旧主写入，防止绕过入口的消费者和补偿任务继续修改；保全两边日志后，按固定成员配置确认上海持有合法 3/5 多数派。</p>
+    <p><b class="bad">A 会把分叉变成覆盖冲突。</b>网络恢复只让差异相遇，不会产生业务仲裁规则。若复制按最后写入时间覆盖，时钟漂移还可能让较旧业务事实看起来更新。先围栏，再复制与合并。</p>
+    <p><b class="bad">C 会按每秒 160 个键扩大人工账单。</b>按地域接受订单只有在单元之间数据与库存互不重叠时才安全；本次两边共享同一场次和用户空间，继续双写就是继续出售同一份权利。</p>
+    <p><b class="mid">D 只围住了前门。</b>DNS 有缓存与传播延迟，杭州本地消费者、定时任务和内部调用仍能直写。流量切换应该配合存储 fencing；没有下游拒绝，旧主仍可能在网络恢复后补写。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">15 · 2 原理</span>活着不等于有资格写</h2>
+
+<p>多活最难的不是启动第二套系统，而是网络断开时仍维持单一裁决。对于共享同一份业务事实、要求强一致写入的固定成员集，核心约束是：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+多数派门槛　q = ⌊ N / 2 ⌋ + 1<br>
+交集性质　　任意两个多数派 Q₁ ∩ Q₂ ≠ ∅<br>
+可用性边界　最多故障 ⌊( N − 1 ) / 2⌋ 个节点时仍能凑出多数派
+  </div>
+</div>
+
+<p>请注意第二行才是安全性的来源，而且它常被记错：<strong>固定 5 节点集群里并不是"只存在一个多数派"</strong>——任取 3 个节点都算多数派，一共 C(5,3) = <strong>10 个</strong>合法子集，其中很多可以同时在线。让写入安全的不是"多数派唯一"，而是<strong>任意两个多数派必然相交</strong>：那个交集里的诚实节点不会在同一任期为两个主投票，冲突历史因此无法各自拿到多数确认。</p>
+
+<p>交集性质也只是必要条件，不是充分条件。要真正保证写安全，共识协议还必须做到：同一任期不重复投票、提交与日志匹配规则拒绝冲突历史、成员变更走安全的联合共识、以及<strong>旧主恢复后被任期检查或 fencing token 拒绝</strong>（本章 D1 就是这一条的现场版）。</p>
+
+<p>第三行则要单独看：<code>⌊(N−1)/2⌋</code> 描述的是<em>可用性</em>边界——还能凑出多数派、因而还能继续服务的故障上限。超过它时，正确的系统应当<strong>停止写入</strong>，此时安全性依然成立，只是不再可用。<strong>把它当成"安全性的故障上限"是本节最容易犯的错。</strong>代入节点数：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">3 节点</div>
+    <div class="v" style="color:var(--green)">容忍 1 个故障</div>
+    <div class="d">⌊(3−1)/2⌋ = 1</div>
+  </div>
+  <div class="metric">
+    <div class="k">3 节点多数派</div>
+    <div class="v">2 票</div>
+    <div class="d">只剩 1 节点时停止写</div>
+  </div>
+  <div class="metric">
+    <div class="k">5 节点</div>
+    <div class="v" style="color:var(--green)">容忍 2 个故障</div>
+    <div class="d">⌊(5−1)/2⌋ = 2</div>
+  </div>
+  <div class="metric">
+    <div class="k">5 节点多数派</div>
+    <div class="v">3 票</div>
+    <div class="d">2 节点侧不能写</div>
+  </div>
+</div>
+
+<p>本次原始成员是 5 个：上海 3、杭州 2。链路断开后，上海 3/5 可以形成多数派，杭州 2/5 应停止强一致写。事故发生在杭州自动化没有保持原成员配置，而是把本地 2 节点重建成新的 2 节点集群；两个成员宇宙各自拥有多数，交集性质被配置变更绕开。</p>
+
+<p>因此成员变更本身必须走共识，不能在网络分区时由两边独立「紧急重配」。若确需灾难恢复中重建集群，要先通过外部围栏撤销旧集群写资格，再授予新集群更高 fencing token。可用性可以暂时降低，写入权不能同时复制。</p>
+
+<div class="kicker">容灾系统最重要的开关不是「提升为主」，而是「让旧主再也写不进去」。没有围栏的切换，只是在相信旧世界会及时听话。</div>
+
+<h3>RTO 与 RPO：恢复多快，愿意丢多少</h3>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>指标</th>
+        <th>定义</th>
+        <th>秒抢示例</th>
+        <th>容易混淆的点</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>RTO</strong></td>
+        <td>从故障发生到业务恢复到目标服务水平的最长时间</td>
+        <td>核心查询 5 分钟恢复，出票 30 分钟追平</td>
+        <td>不是机器启动时间；要包括切流、校验和依赖恢复</td>
+      </tr>
+      <tr>
+        <td><strong>RPO</strong></td>
+        <td>恢复后可接受的数据丢失时间窗口</td>
+        <td>已付款订单 RPO=0；推荐点击可接受分钟级</td>
+        <td>不是复制延迟本身，而是业务愿意承担的丢失上限</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>假设 14:00 故障，14:04 恢复只读查询，14:09 恢复下单，那么核心写链路实际 RTO 是 9 分钟，不是实例在 14:02 启动所花的 2 分钟。若最后可恢复的订单日志停在 13:59:50，恢复点丢了 10 秒写入，实际 RPO 是 10 秒；对已付款订单，目标 RPO=0 意味着还要用支付账单与幂等日志补齐。</p>
+
+<p>RTO 与 RPO 都要按业务能力分层。目录浏览可以先恢复并接受短时旧数据，库存扣减必须等写入资格和状态核验完成；把整站写成一个「RTO 5 分钟」，会让最快的页面掩盖最慢的资金链路。</p>
+
+<h3>三档多活，不是同一个名词的豪华版</h3>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>档位</th>
+        <th>流量与数据</th>
+        <th>主要收益</th>
+        <th>主要账单</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>同城双活</strong></td>
+        <td>两机房同时接流量，低延迟同步或共享主写</td>
+        <td>机房故障切换快，网络时延较可控</td>
+        <td>仍受城市级灾害与共享网络故障影响；双写权要明确</td>
+      </tr>
+      <tr>
+        <td><strong>异地多活</strong></td>
+        <td>多城市接流量，跨城复制，写策略按业务分级</td>
+        <td>覆盖城市级故障，用户可就近访问</td>
+        <td>延迟、复制窗口、冲突仲裁和运营成本显著增加</td>
+      </tr>
+      <tr>
+        <td><strong>单元化</strong></td>
+        <td>用户、库存与订单按单元归属，每单元尽量闭环</td>
+        <td>故障与热点限制在单元，跨城双写减少</td>
+        <td>路由、用户迁移、全局查询与单元间交易更复杂</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>单元化解决本次脑裂的前提，是同一业务键只归一个单元：上海用户与杭州用户若购买不同库存配额，分区时可以各自继续；若两边仍竞争同一场次最后 100 张票，地域标签没有消除共享写入事实。单元边界必须落到数据和配额，而不只是流量入口。</p>
+
+<p>跨单元操作要显式承认代价。用户迁移需要冻结写入、复制状态、切路由再校验；全局订单搜索可以异步聚合，允许短时旧；支付与库存扣减则留在归属单元，避免一次交易同时要求两个城市达成同步事务。</p>
+
+<h3>fencing token：让下游识别旧主</h3>
+
+<p>第 11 章已经看到，锁过期后旧持有者可能醒来继续写。多活切换是同一问题的机房级版本。fencing token 为每次合法获得写权的主分配单调递增编号，下游记录自己见过的最大 token，并拒绝更小编号的写。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">上海旧主</div>
+    <div class="v">token 41</div>
+    <div class="d">网络恢复后补发</div>
+  </div>
+  <div class="metric">
+    <div class="k">杭州新主</div>
+    <div class="v" style="color:var(--green)">token 42</div>
+    <div class="d">已获新租约</div>
+  </div>
+  <div class="metric">
+    <div class="k">存储已见最大值</div>
+    <div class="v">42</div>
+    <div class="d">写入护栏</div>
+  </div>
+  <div class="metric">
+    <div class="k">旧主写入结果</div>
+    <div class="v" style="color:var(--red)">拒绝 41</div>
+    <div class="d">41 &lt; 42</div>
+  </div>
+</div>
+
+<p>token 必须由具备单调性与持久性的权威发放，下游也必须真正校验；把 token 只写进日志，没有形成围栏。若某个旁路消费者不校验，它就是旧主重新进入系统的后门。</p>
+
+<h3>分叉数据不能靠最后写入时间草率合并</h3>
+
+<p>网络恢复后，两边会带着同一业务键的不同版本相遇。按 <code>last_write_wins</code> 合并看似简单，却依赖跨机房时钟可比较；附录 No.17 会说明时钟漂移如何让时间轴自相矛盾。订单、支付和库存更需要业务仲裁：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>数据类型</th>
+        <th>冲突示例</th>
+        <th>仲裁原则</th>
+        <th>恢复动作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>订单状态</strong></td>
+        <td>一边 PAID，一边 CANCELLED</td>
+        <td>按支付权威账与状态机版本判断，不按墙上时间</td>
+        <td>保留证据，生成补偿状态</td>
+      </tr>
+      <tr>
+        <td><strong>库存</strong></td>
+        <td>两边扣了同一份配额</td>
+        <td>以预先分配的单元配额或合法 token 为准</td>
+        <td>冻结受影响场次，逐笔履约与补偿</td>
+      </tr>
+      <tr>
+        <td><strong>用户偏好</strong></td>
+        <td>两边修改不同字段</td>
+        <td>可按字段合并，冲突字段再用版本策略</td>
+        <td>自动合并并记录审计</td>
+      </tr>
+      <tr>
+        <td><strong>统计计数</strong></td>
+        <td>两边各自累加</td>
+        <td>若操作可交换，可按增量合并</td>
+        <td>重算或使用可合并数据结构</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>第 3 章的复制延迟在同机房里制造了「写完暂时读不到」；跨机房后，延迟会扩到秒级甚至分钟级，网络分区还会让「暂时旧」升级为「双边各自写」。异地多活不是读写分离加一条更长的网线，而是必须重新定义哪些数据允许分叉、哪些写入需要多数派。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">15 · 3 病历卡</span>两条都在前进的时间线</h2>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>脑裂</h3>
+    <span class="case-no">病历卡 No.14</span>
+  </div>
+  <div class="case-alias">Split Brain · 两边同时认为自己有写入资格</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">网络分区、错误成员变更或失效围栏让两个节点组同时自认主节点，并接受同一业务空间的写入；复制恢复后出现无法自动判定权威的冲突事实。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">██‖██</span>　双线分叉型。两地写入吞吐都不为零、各自成功率正常，同一业务键的版本号或状态却沿两条线并行增长；复制恢复时冲突集中暴露。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">跨机房链路中断；两地独立自动提升；分区时紧急重配成员；DNS 只切流量但旧主仍可写；旧 token 未被下游拒绝。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>固定多数派</strong>：成员变更也走共识；② <strong>双层围栏</strong>：入口停流 + 存储 token 拒绝；③ <strong>单元化配额</strong>：减少跨城共享写；④ <strong>业务仲裁</strong>：分叉后按支付、库存与状态机证据合并。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」容灾演练误触发两套本地提升逻辑，上海与杭州同时写入共享订单空间；冲突键以约 160/s 增长。团队围栏杭州写入、保全双边日志，并按合法多数派与业务账本逐笔收敛。</div>
+    </div>
+  </div>
+</div>
+
+<p><span class="sym">██‖██</span> 与常见宕机曲线不同：两边都活着、都忙、都认为成功。诊断钩子不是某条线掉下去，而是同一业务键出现两个并行版本。关卡四会把这个场景变成交互推演，让你在恢复速度与写入安全之间亲自做选择。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">15 · 5 权衡</span>同城双活，还是异地多活</h2>
+
+<p>容灾不是地理距离越远越好。距离购买更大的故障隔离，也带来更长复制延迟、更难写入仲裁和更昂贵演练。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>「秒抢」下一阶段应选择哪种多活形态？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    同城双活：两机房接流量，核心写保留单一多数派
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    异地多活：上海、杭州同时服务，按业务定义跨城一致性
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    单元化异地多活：用户与场次配额归属单元，跨单元异步聚合
+  </button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · 同城双活</b>：链路延迟低，强一致多数派与切流更容易达到分钟级 RTO。<strong>账单：</strong>城市级电力、网络或灾害仍可能同时影响两处；共享依赖会削弱隔离。适合先解决单机房故障、核心写强一致且团队演练经验有限的阶段。</p>
+    <p><b class="mid">B · 异地多活</b>：覆盖城市级故障，用户可就近访问，区域容量可以互相接管。<strong>账单：</strong>跨城延迟、复制窗口、脑裂围栏、冲突仲裁和双边运营显著更复杂；不是每类数据都适合双写。适合业务已分级、RTO/RPO 清晰并能持续演练的团队。</p>
+    <p><b class="mid">C · 单元化异地多活</b>：大多数交易在本单元闭环，故障和热点不易跨区域传播，共享强一致写减少。<strong>账单：</strong>单元路由、迁移、全局查询和跨单元业务需要新模型，容量配额可能碎片化。适合用户规模大、业务键可稳定归属的长期架构。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：目标采用 <strong>C</strong>，但分两步走。先把同城双活的多数派、fencing、RTO/RPO 和演练做扎实；再按用户与场次配额建立上海、杭州单元，订单写在归属单元闭环，全局搜索异步聚合。没有通过关卡四式脑裂演练的能力，不进入跨城双写名单。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">15 · 6 复盘</span>那场演练后来怎么停下双写</h2>
+
+<p>回放 14:07 的正确剧本——恢复服务排在恢复写入安全之后：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">14:08</span>
+    <p><strong>双层围栏。</strong>入口暂停该业务写入，存储侧拒绝杭州旧 epoch；冲突键停在 1,436，消费者与定时任务也无法绕过入口继续写。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">14:11</span>
+    <p><strong>确认合法成员集。</strong>按演练前 5 节点配置核对投票与 token，上海持有 3/5 多数派；撤销杭州临时成员配置，保全两边 WAL、订单事件和流量日志。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">14:19</span>
+    <p><strong>只读先恢复，写入慢放量。</strong>目录和历史订单先恢复；上海写入从 10% → 30% → 100% 放开，每级核对支付、库存与订单不变量，核心写 RTO 实测 12 分钟（14:07 告警 → 14:19 全量放开）。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">15:06</span>
+    <p><strong>仲裁分叉数据。</strong>按合法 token、支付账与库存凭证处理 1,436 个冲突键；自动合并低风险偏好，订单与库存逐笔补偿。完成后才恢复跨城复制。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>切流不等于切写入资格。</strong>DNS 和网关只控制一部分入口；旧主、消费者与任务仍可能写，下游 fencing 才能关上后门。</div>
+  </div>
+  <div class="li">
+    <span class="num">贰</span>
+    <div><strong>多数派依赖固定成员宇宙。</strong>分区时两边独立重配，会让各自多数派失去交集。成员变更必须受同一共识与外部围栏约束。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>RTO 不能以数据分叉为代价。</strong>多停几分钟是可计算的可用性账单；让两边继续写会生成需要法律、客服与人工仲裁的正确性账单。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">15 · 7 自测</span>网络断开时，谁还能写</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">跨城链路中断后，两边写入曲线都保持高位，同一订单键出现两个并行版本：<span class="sym">██‖██</span>。这是什么故障？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>No.14 脑裂</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>No.11 消息积压</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>No.06 缓存雪崩</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>正常异步复制</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>双边同时写、同键版本分叉，是脑裂的诊断钩子。D 很诱人，因为异步复制也会短时不一致；区别是正常架构仍有明确写入权，脑裂时两边都在批准同一业务空间的新事实。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 多数派算术</h3>
+  <p class="stem">固定成员的 5 节点集群，最多容忍多少个节点故障仍可形成多数派写入？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>1 个</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>2 个</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>3 个</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>4 个</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b><code>⌊(5−1)/2⌋ = 2</code>，剩余 3 节点仍是多数派。C 会只剩 2/5，不能安全批准强一致写；若把这 2 个节点紧急重配成新集群，必须先围栏旧集群，否则会破坏交集。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · RTO 与 RPO</h3>
+  <p class="stem">14:00 故障，14:09 恢复核心写；恢复点只能还原到 13:59:50。实际 RTO 与数据窗口分别是多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">A</span>RTO 9 分钟，数据窗口 10 秒</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>RTO 10 秒，数据窗口 9 分钟</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>RTO 9 分钟，数据窗口为 0</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>只要实例 14:02 启动，RTO 就是 2 分钟</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">A。</b>RTO 看业务恢复到目标水平，用时 9 分钟；可恢复点落后故障时刻 10 秒，数据窗口是 10 秒。D 把机器启动当成业务恢复，忽略切流、依赖与校验；C 只有在补齐这 10 秒数据后才成立。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · fencing token</h3>
+  <p class="stem">下游已经接受 token 42 的新主写入，旧主携带 token 41 在网络恢复后补写。下游应怎么做？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>按到达时间接受 41，因为它最后到达</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>拒绝 41，因为它小于已见最大 token 42</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>同时保存两份并让客户端随机读取</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>比较两台机器的墙上时间决定</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>单调 token 代表写入资格代际，旧代写入必须被围栏。A 把网络迟到误当成更新；D 会把安全依赖到可能漂移的时钟，正是附录 No.17 要提醒的陷阱。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「异地多活架构怎么设计？」</b>
+    <span class="ans">答题骨架：业务分级 RTO/RPO → 同城/异地/单元化选择 → 数据归属与写策略 → 多数派和围栏 → 路由与容量接管 → 冲突仲裁 → 演练与回滚。</span>
+  </div>
+  <div class="iq">
+    <b>「脑裂怎么防？」</b>
+    <span class="ans">答题骨架：固定成员集多数派 → 成员变更走共识 → 入口与存储双层 fencing → 单调 token 拒绝旧主 → 单元化减少共享写 → 分叉后按业务账本仲裁。</span>
+  </div>
+  <div class="iq">
+    <b>「RTO/RPO 怎么定？」</b>
+    <span class="ans">答题骨架：按业务影响分层 → RTO 是业务恢复时间、RPO 是可接受丢失窗口 → 映射复制与备份能力 → 计算成本 → 用演练测实际值。反直觉加分点：目标写在文档里不算达成，演练实测才是当前能力。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch14.html">← 第 14 章 · 可观测性——看懂凌晨三点的仪表盘</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.14 已收录于附录图鉴</a></span>
+    <span><a href="level4.html">实战关卡 4 · 脑裂与多活演练 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

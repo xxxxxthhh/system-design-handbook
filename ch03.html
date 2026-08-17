@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 章 · 读写分离——以及复制延迟挖的坑 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch02.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="level1.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 1 · 单机时代 · 第 3 章</div>
+    <h1>读写分离<br>以及复制延迟挖的坑</h1>
+    <p class="h1-sub">你给数据库加了一台读副本，查询压力降了，账单也像是算对了。直到用户付完钱却看见「订单不存在」——扩容没有删除一致性，它只是给旧数据留了一扇门。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">03 · 1 值班现场</span>10:20，付款成功，订单却「不存在」</h2>
+
+<p class="lead">创业第 5 个月，「秒抢」有了约 1 万用户。公司 12 人，后端 3 人；你还是那个第 3 号员工。周一上午的开票刚过峰值，你正准备去接水，客服群在 10:20 突然被同一句话刷屏：「钱扣了，订单呢？」</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 10:20:31</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] paid-order-not-found 比例 <span class="a">18.4%</span>（阈值 0.5%）<br>
+[<span class="a">WARNING</span>] &nbsp;mysql-replica replay lag <span class="a">2.8s</span>（平时约 35ms）<br>
+[<span class="g">INFO</span>] &nbsp;&nbsp;&nbsp;&nbsp;mysql-primary commit success <span class="t">99.98%</span><br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">客服工单摘要：</span><br>
+<span class="t">「支付平台显示成功，订单详情页却返回 ORDER_NOT_FOUND」</span>
+  </div>
+</div>
+
+<p>你把支付回调、主库提交和订单查询放到同一张大盘上。四个数字把「支付失败」这个直觉排除了：</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">支付回调成功率</div>
+    <div class="v">99.97%</div>
+    <div class="d down">● 与平时持平</div>
+  </div>
+  <div class="metric">
+    <div class="k">主库提交 P99</div>
+    <div class="v">46ms</div>
+    <div class="d down">● 无慢提交</div>
+  </div>
+  <div class="metric">
+    <div class="k">副本重放延迟</div>
+    <div class="v">2.8s</div>
+    <div class="d up">▲ 平时约 35ms</div>
+  </div>
+  <div class="metric">
+    <div class="k">详情查询路由</div>
+    <div class="v">92% 副本</div>
+    <div class="d warn">● 含刚支付用户</div>
+  </div>
+</div>
+
+<p>订单写入主库已经成功，详情页却在读副本上查不到它；异常率和副本延迟在同一分钟抬头。林工把复制位点截图甩进群里，只说了一句：「主库没丢，副本还没追上。」这不是数据消失，而是用户跑到了数据前面。</p>
+
+<p>再看一眼时间轴：订单 <code>O-102014</code> 在 10:20:14.200 提交，用户在 10:20:14.650 打开详情页，只隔了 450ms；当时副本落后 2.8s。页面把「此刻还没复制到」翻译成了「订单不存在」，客服工单于是开始滚雪球。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 10:22。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立刻再加两台读副本，把查询流量摊薄
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    让前端每 200ms 自动重查订单，直到查到为止
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    把「刚支付后的订单详情」临时强制路由到主库，并把未命中改成处理中
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    暂停正在主库执行的结算批任务，减少后续复制压力
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先堵住错误读。</b>
+      主库已经有订单，短时把刚支付用户的读请求送回主库，能立刻恢复「读到自己刚写的数据」；同时把副本未命中从「不存在」降级为「处理中」，避免把暂时不可见宣判成永久失败。路由范围只圈住刚支付链路，主库账单可控。
+    </p>
+    <p>
+      <b class="bad">A 的问题是时间，也可能选错了药。</b>
+      新副本要拉取数据并追赶日志，不会在下一分钟接住客服工单；如果重放才是瓶颈，多一台同样落后的副本只是多一个旧答案。扩读容量适合稳态容量问题，不适合眼前的写后读缺口。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      每个受影响用户一秒发五次查询，会把读流量和客服焦虑一起放大；轮询最终也许能读到，但它既没有建立读路由契约，也可能在复制继续落后时制造小型重试风暴。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      大事务确实可能拖慢副本重放，暂停批任务能阻止延迟继续扩大；然而已经积压的日志仍要追平，当前用户仍在读旧副本。它应该紧跟在 C 后面，而不是代替止血。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">03 · 2 原理</span>复制把一致性改写成时间问题</h2>
+
+<p>读写分离的路径并不复杂：写请求进入主库，主库提交事务并产生复制日志；副本接收日志，再按顺序重放；读路由把查询送到副本。主库提交成功与副本重放完成是两个时刻。只要复制是异步的，中间就存在一个可以读到旧数据的窗口。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+可能读到旧数据的时间窗 = 复制延迟
+  </div>
+</div>
+
+<p><strong>「读写分离没有消灭一致性问题，它把问题从『有没有』变成了『多久』。」</strong>写入是否成功，回答的是主库有没有；用户何时能在副本看到它，回答的是复制要多久。这两个问题混在一个 <code>ORDER_NOT_FOUND</code> 里，产品语义就会撒谎。</p>
+
+<p>把现场的一个订单代进去：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">主库提交</div>
+    <div class="v" style="color:var(--green)">10:20:14.200</div>
+    <div class="d">订单已经存在</div>
+  </div>
+  <div class="metric">
+    <div class="k">用户发起读</div>
+    <div class="v" style="color:var(--amber)">10:20:14.650</div>
+    <div class="d">写后 450ms</div>
+  </div>
+  <div class="metric">
+    <div class="k">复制延迟</div>
+    <div class="v" style="color:var(--red)">2.8s</div>
+    <div class="d">旧数据窗口</div>
+  </div>
+  <div class="metric">
+    <div class="k">副本可见</div>
+    <div class="v" style="color:var(--teal)">约 10:20:17.000</div>
+    <div class="d">提交时刻 + 2.8s</div>
+  </div>
+</div>
+
+<p>10:20:14.650 落在 10:20:14.200 到约 10:20:17.000 之间，所以副本返回旧结果并不神秘。更危险的是倍数：平时约 35ms，现场 2.8s，窗口扩大到 <strong>2.8 ÷ 0.035 = 80 倍</strong>。若峰值每秒完成 240 笔支付，并且每位用户都立即看一次订单，最多约有 <strong>240 × 2.8 = 672 次</strong>写后读暴露在这个窗口里。这个数不是丢单数，而是需要正确路由或正确展示的风险读次数。</p>
+
+<p>复制延迟通常从三处累积，定位时要分开看：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>来源</th>
+        <th>发生了什么</th>
+        <th>该看什么</th>
+        <th>常见误判</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>网络</strong></td>
+        <td>日志从主库到副本的传输变慢、抖动或中断</td>
+        <td>发送位点与接收位点差距、链路 RTT、吞吐</td>
+        <td>只看副本 CPU，误以为机器空闲就没有延迟</td>
+      </tr>
+      <tr>
+        <td><strong>单线程重放</strong></td>
+        <td>单个重放线程按序应用日志，主库并发写入速度超过它的消费速度</td>
+        <td>接收位点已追上，但应用位点持续落后</td>
+        <td>继续加读副本，却没有提高单副本的重放能力</td>
+      </tr>
+      <tr>
+        <td><strong>大事务</strong></td>
+        <td>一笔批量更新占住重放路径，后面的小订单只能排队</td>
+        <td>事务大小、重放耗时、延迟是否与批任务同步</td>
+        <td>把毛刺当网络偶发抖动，忽略固定时刻的批处理</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>因此「复制延迟」不能只挂一个模糊的秒数。至少要同时观察主库当前提交位点、副本接收位点、副本应用位点，并用时间戳或日志序号求差：接收慢，先查网络；接收快而应用慢，查重放和事务。对业务再补一层 <code>write-to-visible</code> 指标：从订单提交到各副本能够查到它，P50、P99 各是多少。</p>
+
+<div class="kicker">读副本给你的是吞吐账单，不是新鲜度担保。每一条读路由都应该写清：它能接受多旧的数据；如果刚写完，它要读主库、粘住会话，还是允许界面先展示结果。</div>
+
+<p>今天同机房里的 2.8 秒已经足以制造「丢单」。到第 15 章，复制跨过机房边界，网络距离、链路故障和恢复追赶会让这个延迟变成秒级甚至分钟级；届时，新鲜度不再只是一个接口的选择，而会升级成多活架构的核心契约。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">03 · 3 病历卡</span>主库有，副本晚一点才有</h2>
+
+<p>这类事故最容易被误报成「丢单」或「缓存没刷新」。真正的诊断钩子不是某一次 404，而是错误读与写高峰、复制延迟在时间上同步出现。</p>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>主从复制延迟</h3>
+    <span class="case-no">病历卡 No.02</span>
+  </div>
+  <div class="case-alias">Replication Lag · 写入已提交，副本尚未重放</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">主库提交与副本应用日志之间存在时间差。读路由把刚写完的查询送到尚未追平的副本，于是返回旧行、旧状态或空结果；写越密、重放越慢，暴露窗口越大。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁▃▁▁█▁</span>　与写高峰同步的毛刺型。主库提交成功，副本查询却短暂未命中；业务错误率与复制延迟、批量写入在同一分钟抬升，待副本追平后自行回落。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">开票和支付后的立即查询；大事务或批任务与在线写共用复制通道；单线程重放追不上主库并发写；网络抖动后副本集中追赶。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>给关键写后读划主库通道</strong>：支付结果、刚创建订单等强时序链路不读落后副本；② <strong>会话粘性</strong>：记录本会话的写入时间或位点，在安全窗口内读主；③ <strong>缩短与监控重放</strong>：拆小大事务，分别监控接收差与应用差；④ <strong>修正产品语义</strong>：复制窗口内显示处理中，不把暂时不可见说成不存在。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」本次开票中，主库提交成功率 99.98%，副本延迟从约 35ms 毛刺到 2.8s；刚支付的详情查询有 18.4% 返回未命中。强制写后读主并暂停大事务后，错误率随复制位点追平而回落。</div>
+    </div>
+  </div>
+</div>
+
+<p>记住这张卡的形状：<span class="sym">▁▁▃▁▁█▁</span>。如果尖刺跟写高峰一起出现，先对齐主库提交、副本接收、副本应用三个时刻，再决定要不要怀疑业务写入。先确认「晚到」，能避免把一场路由事故升级成错误的数据补写。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">03 · 5 权衡</span>写后读的三份正确账单</h2>
+
+<p>事故止住后，林工在白板上写下三个方案。它们都能缓解「刚写完就读不到」，但承诺并不相同：有的购买数据库新鲜度，有的购买会话连续性，有的只购买更好的用户体验。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>订单写入主库后，紧接着的详情查询应该怎么走？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    强制读主：关键订单状态直接查询主库
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    会话粘性：本会话写入后的一小段窗口内读主
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    前端乐观展示：用写响应先展示订单，再异步确认
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 强制读主</b>：对被圈定的接口提供最直接的写后读一致性，路由简单，排障也直观。
+      <strong>账单：</strong>读压力回到主库，热点查询可能挤占写入资源，主库故障域也被更多请求触碰。适合支付结果、退款状态等读错代价高、查询量可控的场景。
+    </p>
+    <p>
+      <b class="mid">B · 会话粘性</b>：只让刚发生写入的用户暂时读主，普通读仍由副本分担，容量与新鲜度较平衡。
+      <strong>账单：</strong>路由层要携带写入时间或位点；多设备、会话漂移和窗口估短都会漏掉旧读，估长则把更多压力送回主库。适合登录态稳定、写后读集中在数秒内的交互链路。
+    </p>
+    <p>
+      <b class="mid">C · 前端乐观展示</b>：用户立刻看到写请求返回的订单摘要，页面不必等副本追平，体验最平滑。
+      <strong>账单：</strong>它改善的是展示，不是数据库一致性；后续支付撤销、写入补偿或跨设备查询仍需权威状态确认。适合创建成功概率高、允许显示「确认中」并有失败回滚界面的场景。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：以 <strong>B</strong> 做默认路由，支付成功后的 5 秒会话窗口读主；同时采用 <strong>C</strong>，先用支付回调中的订单摘要展示「已受理，确认中」。退款与票权核销这类读错代价更高的接口单独走 <strong>A</strong>。理由是约 1 万用户阶段主库还有余量，但团队不想让普通订单历史查询重新淹没写路径；三层护栏分别处理路由、新鲜度和界面语义。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">03 · 6 复盘</span>那 18 分钟后来怎么收住了</h2>
+
+<p>回放 10:20 的正确剧本——留意动作顺序：先停止向用户输出错误结论，再压住延迟来源，最后才恢复读流量。</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">10:22</span>
+    <p><strong>堵住错误读。</strong>打开订单写后读主开关，只圈住支付成功后的详情请求；副本未命中改成「订单确认中」。paid-order-not-found 从 18.4% 降到 1.2%，主库读 QPS 上升约 9%，仍在容量线内。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:25</span>
+    <p><strong>停止继续积压。</strong>暂停与开票重叠的结算批任务，并确认主库提交仍健康。副本应用位点开始追近，重放延迟从 2.8s 回落到 900ms。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:29</span>
+    <p><strong>等待追平，不重启。</strong>副本已经收到日志，瓶颈在应用端；团队让重放队列自然排空，同时逐笔核对支付单与主库订单。延迟降到 70ms，未发现真实丢单。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:38</span>
+    <p><strong>收窄临时开关。</strong>保留 5 秒会话粘性，普通历史查询恢复读副本；告警改为同时监控接收位点差、应用位点差和写后可见 P99。主库读 QPS 回到基线附近，客服新增工单停止。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>「提交成功」和「读得到」是两条指标。</strong>只盯主库成功率，会把复制窗口里的用户留在监控盲区；业务上要量从写入到副本可见的时间。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>把新鲜度写进读路由契约。</strong>订单历史可以容忍短暂旧值，刚支付的订单不能被判成不存在。先按读错代价分流，再谈副本承载多少 QPS。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>大事务也要交复制账单。</strong>主库上一次看似顺利的批处理，可能在副本重放端变成一道闸门。拆小事务、错开高峰，并监控应用位点而非只看传输是否在线。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">03 · 7 自测</span>你能分清丢失与晚到吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">主库提交成功率平稳；业务未命中曲线呈 <span class="sym">▁▁▃▁▁█▁</span>，每根毛刺都与写高峰和副本应用延迟同步，追平后自行回落。最可能是哪种故障？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">A</span>
+      主库随机丢失订单
+    </button>
+    <button class="opt" data-q="q1" data-k="good">
+      <span class="tag">B</span>
+      主从复制延迟
+    </button>
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">C</span>
+      连接池耗尽
+    </button>
+    <button class="opt" data-q="q1" data-k="bad">
+      <span class="tag">D</span>
+      前端静态资源缓存
+    </button>
+  </div>
+  <div class="verdict" id="v-q1">
+    <p>
+      <b class="good">B。</b>
+      「与写高峰同步的毛刺 + 主库成功 + 追平后恢复」正是 No.02 的形状。A 很诱人，因为用户看到的就是「丢单」，但真实丢失不会随着副本位点追平而自己出现；C 更常表现为连接与延迟阶跃打满，不会只让副本读到旧数据。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 时间窗算术</h3>
+  <p class="stem">订单在 10:20:14.200 于主库提交，当时复制延迟为 2.8s。用户在 10:20:16.400 从副本读取。以下判断哪个最准确？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">A</span>
+      已过 2.2s，副本肯定可见
+    </button>
+    <button class="opt" data-q="q2" data-k="good">
+      <span class="tag">B</span>
+      仍在 2.8s 窗口内，可能读到旧数据
+    </button>
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">C</span>
+      要等 5.6s，因为读写各占 2.8s
+    </button>
+    <button class="opt" data-q="q2" data-k="bad">
+      <span class="tag">D</span>
+      复制延迟只影响写，不影响读
+    </button>
+  </div>
+  <div class="verdict" id="v-q2">
+    <p>
+      <b class="good">B。</b>
+      读取发生在提交后 2.2s，而旧数据窗口是 2.8s，副本约到 10:20:17.000 才追到这笔写。A 把「已经等了一段时间」误当成「已经等够」；C 又把同一个复制窗口重复计算了一次，读操作不会再凭空增加一段 2.8s。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 定位延迟来源</h3>
+  <p class="stem">监控显示副本接收位点几乎贴着主库，但应用位点持续落后，并且毛刺总与一笔批量结算事务同时出现。第一排查方向是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">A</span>
+      主从之间网络丢包
+    </button>
+    <button class="opt" data-q="q3" data-k="good">
+      <span class="tag">B</span>
+      大事务阻塞或压慢副本重放
+    </button>
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">C</span>
+      浏览器 DNS 缓存
+    </button>
+    <button class="opt" data-q="q3" data-k="bad">
+      <span class="tag">D</span>
+      再加一层前端轮询
+    </button>
+  </div>
+  <div class="verdict" id="v-q3">
+    <p>
+      <b class="good">B。</b>
+      日志已经及时到达，差距出现在「接收之后、应用之前」，又与大事务同步，证据指向重放路径。A 是最常见的惯性答案，但若网络是主因，接收位点本身就会落后；D 只会增加读负载，不能让应用位点追得更快。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 方案边界</h3>
+  <p class="stem">团队用写响应里的订单摘要做前端乐观展示。这个方案提供的主要承诺是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">A</span>
+      副本已与主库强一致
+    </button>
+    <button class="opt" data-q="q4" data-k="good">
+      <span class="tag">B</span>
+      复制追平前给用户连续体验，并保留确认中语义
+    </button>
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">C</span>
+      主库不再需要保存订单
+    </button>
+    <button class="opt" data-q="q4" data-k="bad">
+      <span class="tag">D</span>
+      跨设备查询也会立刻看到新订单
+    </button>
+  </div>
+  <div class="verdict" id="v-q4">
+    <p>
+      <b class="good">B。</b>
+      乐观展示复用写响应，解决的是复制窗口内的界面连续性，并没有改变副本状态。A 最诱人，因为页面看起来已经正确，但视觉正确不等于数据层强一致；D 也不成立，另一台设备没有本次写响应，仍需要会话路由或读主保障。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「主从延迟导致读到旧数据，怎么办？」</b>
+    <span class="ans">答题骨架：先按业务定义可接受新鲜度 → 圈出关键写后读 → 强制读主 / 会话粘性 / 乐观展示三选或组合 → 给出主库容量与失败回滚账单。</span>
+  </div>
+  <div class="iq">
+    <b>「复制延迟怎么监控？」</b>
+    <span class="ans">答题骨架：主库提交位点 → 副本接收位点 → 副本应用位点 → 区分网络与重放 → 补业务 write-to-visible 的 P50/P99 → 按新鲜度目标告警。</span>
+  </div>
+  <div class="iq">
+    <b>「读写分离的路由放哪一层？」</b>
+    <span class="ans">答题骨架：列应用层 / 数据访问层 / 代理层责任边界 → 比较业务语义感知、统一治理与故障切换 → 用写后读标记贯穿路由。反直觉加分点：路由不只是负载均衡，它也在执行一致性契约。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch02.html">← 第 2 章 · 第一次宕机——连接池耗尽之夜</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.02 已收录于附录图鉴</a></span>
+    <span><a href="level1.html">实战关卡 1 · 数据库生死演练 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

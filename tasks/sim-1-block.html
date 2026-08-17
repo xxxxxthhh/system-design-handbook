@@ -1,0 +1,49 @@
+<h2><span class="sec">02 · 4 模拟器</span>ρ 不是效率，是悬崖边的距离</h2>
+<p style="max-width:760px">调节到达、服务耗时、连接池和超时，观察利用率接近 100% 时尾延迟如何失控，以及超时怎样用快速失败换回存活请求的延迟。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">QUEUEING SIMULATOR · 秒抢接口监控</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="P50、P99、利用率和超时错误率随时间变化"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--teal)"></i>P50</span>
+    <span><i style="background:var(--amber)"></i>P99</span>
+    <span><i style="background:var(--text)"></i>利用率 ρ</span>
+    <span><i style="background:var(--red)"></i>超时错误率</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">P50</div><div class="v" id="m-p50">—</div></div>
+    <div class="sim-metric"><div class="k">P99</div><div class="v" id="m-p99">—</div></div>
+    <div class="sim-metric"><div class="k">利用率 ρ</div><div class="v" id="m-rho">—</div></div>
+    <div class="sim-metric"><div class="k">超时错误率</div><div class="v" id="m-error">—</div></div>
+    <div class="sim-metric"><div class="k">处理吞吐</div><div class="v" id="m-throughput">—</div></div>
+  </div>
+  <div class="controls">
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>到达 QPS <span id="lb-qps">80 QPS</span></label>
+      <input type="range" id="sl-qps" min="1" max="1000" step="1" value="80"></div>
+    <div class="slider"><label>单请求服务耗时 <span id="lb-service">100 ms</span></label>
+      <input type="range" id="sl-service" min="20" max="2000" step="10" value="100"></div>
+    <div class="slider"><label>并发数 / 连接池 <span id="lb-concurrency">10 槽</span></label>
+      <input type="range" id="sl-concurrency" min="1" max="100" step="1" value="10"></div>
+    <div class="slider"><label>超时 <span id="lb-timeout">10000 ms</span></label>
+      <input type="range" id="sl-timeout" min="50" max="10000" step="50" value="10000"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>走近悬崖。</strong>保持 100ms、10 槽，把到达 QPS 依次调到 50、80、95，记录 P99 → ρ 按 50% / 80% / 95% 线性上涨，P99 单调上涨，且 95% 时超过 50% 时的 4 倍。<strong>ρ 是风险指标，不是效率勋章。</strong></li>
+    <li><strong>连接池幻觉。</strong>保持 95 QPS，把并发从 10 翻到 20 → 下游有效并行度没变，处理吞吐变化不到 10%，排队更深，P99 不降。<strong>槽位不是服务能力；无限加大连接池只会把等待藏进去。</strong></li>
+    <li><strong>用超时止损。</strong>保持 95 QPS，把超时从 3000ms 收到 300ms → 错误率上升，但存活请求 P99 下降超过 50%。<strong>系统从全员慢死变成部分快速失败。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->

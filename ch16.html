@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 16 章 · 混沌工程与容量规划——主动把系统弄坏 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="level4.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="appendix-cards.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 4 · 高可用与多活 · 第 16 章</div>
+    <h1>混沌工程与容量规划<br>主动把系统弄坏</h1>
+    <p class="h1-sub">六年前，生产故障总在你没准备时敲门。今天你主持第一次生产游戏日：先写稳态，再圈爆炸半径，然后亲手注入那些熟悉的故障，看看预案究竟是护栏还是文档。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">16 · 1 值班现场</span>10:00，这一次，P0 是你亲手按下的</h2>
+
+<p class="lead">创业第 6 年，「秒抢」累计用户约 1.2 亿。公司 300 人，研发 80 人。你站在生产游戏日指挥台前，SRE、订单、支付、库存与客服负责人全部在线。大盘全绿，用户并不知道今天会有一台机器被故意拿走。</p>
+
+<div class="pager" aria-label="生产游戏日战备">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>GAME DAY · ARMED · 计划注入于 10:05:00</div>
+  <div class="pager-body">
+[<span class="t">STEADY</span>] 核心下单成功率 <span class="t">99.93%</span>，P99 268ms<br>
+[<span class="a">GUARD</span>] &nbsp;自动回滚：成功率 &lt; 99.5% 或 P99 &gt; 500ms，连续 2 个窗口<br>
+[<span class="a">SCOPE</span>] &nbsp;单个订单单元、1% 生产流量、禁止触碰退款与对账任务<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">实验计划：</span><br>
+<span class="t">注入缓存节点不可用 → 验证限流、回源保护与自动回滚</span>
+  </div>
+</div>
+
+<p>你没有从“杀哪台机器”开始，而是先让每个人复述停止条件。库存对账差异必须为 0；核心成功率不能低于 99.5%；P99 不能连续两个窗口超过 500ms；爆炸半径固定在一个单元的 1% 流量。任何一条越线，自动回滚，不等人投票。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">预估峰值</div>
+    <div class="v">120 万 QPS</div>
+    <div class="d warn">● 下一次大促</div>
+  </div>
+  <div class="metric">
+    <div class="k">压测验证容量</div>
+    <div class="v">180 万 QPS</div>
+    <div class="d down">● 故障前稳态</div>
+  </div>
+  <div class="metric">
+    <div class="k">容量水位</div>
+    <div class="v">0.67</div>
+    <div class="d down">● 低于红线 0.7</div>
+  </div>
+  <div class="metric">
+    <div class="k">实验爆炸半径</div>
+    <div class="v">1% 流量</div>
+    <div class="d warn">● 单一订单单元</div>
+  </div>
+</div>
+
+<p>阿凯的手停在注入按钮上：「先从预发再演一遍，还是按计划上生产？」这不是胆量测试。你要判断的是，哪种最小动作能验证“生产流量、真实依赖和自动回滚共同工作”，同时不把学习成本转嫁给整站用户。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>10:04，第一次生产注入应该怎么开始？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    直接断开一个机房，验证异地多活能否整体接管
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    给全部缓存节点注入 3 秒延迟，人工观察后再决定回滚
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    只下线一个单元的一台缓存节点，限 1% 流量并启用自动回滚
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    把同样实验只留在预发，不进入生产
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：用最小爆炸半径验证完整闭环。</b>
+      一台缓存节点足以触发回源、限流、告警与回滚路径；单元边界和 1% 流量限制影响范围，机器执行停止条件又避免人工迟疑。实验有明确学习目标，也有明确刹车线。
+    </p>
+    <p>
+      <b class="bad">A 的问题是跨过了太多未知。</b>
+      机房级切换同时触碰流量调度、数据一致性、容量与网络，第一次生产实验很难判断失败来自哪一层。爆炸半径也远大于本次要验证的缓存回源护栏。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      全集群同时变慢会把回源洪峰直接交给数据库；“人工观察后再回滚”把停止时间交给会议延迟。实验若没有机器可执行的回滚条件，就在用用户等待换团队反应时间。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但证据不完整。</b>
+      预发适合验证注入工具、指标和回滚脚本，却缺少生产流量形状、真实依赖配额与实际网络。它是生产实验的前置门槛，不能替代受控生产证据。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">16 · 2 原理</span>容量给实验留余量，实验给预案还真相</h2>
+
+<p>容量规划先回答“峰值离验证上限还有多远”。不能把机器规格或理论吞吐当容量，分母必须是相同业务路径、相同数据形状下，由压测真正完成并持续稳定的吞吐。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+容量水位 = 预估峰值流量 ÷ 已压测验证容量　　（红线 0.7）
+  </div>
+</div>
+
+<p>代入下一次大促：预估峰值 120 万 QPS，已压测验证容量 180 万 QPS，水位是 <strong>120 ÷ 180 ≈ 0.67</strong>，低于 0.7 红线。余下约 33% 不是闲置，它要吸收预测误差、长尾、单元故障与实验扰动。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">峰值 120 万</div>
+    <div class="v" style="color:var(--green)">0.67</div>
+    <div class="d">120 ÷ 180</div>
+  </div>
+  <div class="metric">
+    <div class="k">峰值多 15%</div>
+    <div class="v" style="color:var(--red)">0.77</div>
+    <div class="d">138 ÷ 180</div>
+  </div>
+  <div class="metric">
+    <div class="k">失去 1/4 容量</div>
+    <div class="v" style="color:var(--red)">0.89</div>
+    <div class="d">120 ÷ 135</div>
+  </div>
+  <div class="metric">
+    <div class="k">红线</div>
+    <div class="v" style="color:var(--amber)">0.70</div>
+    <div class="d">超过即补容量或减流</div>
+  </div>
+</div>
+
+<p>两个压力测试说明为什么 0.67 仍需谨慎：峰值预测若高 15%，水位变成 <code>138/180≈0.77</code>；若故障让验证容量损失四分之一，只剩 135 万 QPS，水位变成 <code>120/135≈0.89</code>。容量规划要同时给正常峰值与故障后容量算账。</p>
+
+<p>混沌工程不是随机破坏，而是四步可证伪的实验：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>步骤</th>
+        <th>本次游戏日</th>
+        <th>缺了会怎样</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>1 · 稳态假设</strong></td>
+        <td>下单成功率 ≥99.5%，P99 ≤500ms，库存对账差异为 0</td>
+        <td>实验结束后不知道系统算“扛住”还是“没报警”</td>
+      </tr>
+      <tr>
+        <td><strong>2 · 最小爆炸半径</strong></td>
+        <td>一个订单单元、1% 流量、不触碰退款与对账</td>
+        <td>一次学习动作可能升级成整站事故</td>
+      </tr>
+      <tr>
+        <td><strong>3 · 注入</strong></td>
+        <td>下线单台缓存节点，观察回源、限流与依赖传播</td>
+        <td>没有受控变量，无法归因预案是否生效</td>
+      </tr>
+      <tr>
+        <td><strong>4 · 自动回滚</strong></td>
+        <td>成功率或 P99 连续越线即恢复节点并切走实验流量</td>
+        <td>停止实验依赖人工判断，爆炸半径随会议时间扩大</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+稳态假设 → 最小爆炸半径 → 注入 → 自动回滚
+  </div>
+</div>
+
+<p><strong>「没演练过的预案不是预案，是文档。」</strong>限流开关写在手册里，不等于它能在缓存节点消失时及时触发；多活拓扑画在架构图里，也不等于容量和数据边界真的能接管。实验的价值是让预案面对真实因果链。</p>
+
+<div class="kicker">容量余量是刹车距离，混沌实验是刹车测试。没有余量，团队不敢实验；没有实验，团队不知道余量在故障时还剩多少。</div>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">16 · 3 病历卡</span>十四张病历，三类系统性体质</h2>
+
+<p>本章不新增病历卡。收官总检把 No.01–14 各放入一个主类别：放大类关注“一个小触发怎样制造更多负载”，一致性类关注“多份真相怎样分叉”，单点类关注“共享瓶颈怎样让集群余量失效”。分类不是说卡片只有一种属性，而是为了决定先打哪种实验。</p>
+
+<h3>放大类 · 小触发产生更大的内部负载</h3>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.04</span><span class="nm">缓存穿透</span><span class="sym">▁▂▂▃▃▄▄</span>
+  无效 key 绕过缓存持续打 DB；游戏日注入非法 key 洪峰，验证过滤器、空值缓存与入口限速。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.05</span><span class="nm">缓存击穿</span><span class="sym">▁▁▁█▁▁▁</span>
+  一个热点 key 失效放大成并发回源；注入热点过期，验证互斥回源只放一个请求。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.06</span><span class="nm">缓存雪崩</span><span class="sym">███▁▁▁▁</span>
+  大片 key 同时失效把总读量交给 DB；下线缓存节点，验证限流、预热与慢放量。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.07</span><span class="nm">重试风暴</span><span class="sym">▁▂▄█████</span>
+  下游失败产生更多内部尝试；注入支付超时，验证单一重试责任层、预算与熔断。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.08</span><span class="nm">惊群效应</span><span class="sym">▁▁█▁▁█▁</span>
+  等待者在同一刻醒来形成周期尖峰；让一批客户端同时退避，验证 jitter 能否拆散同步。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.09</span><span class="nm">级联故障</span><span class="sym">███▇▅▃▁</span>
+  局部变慢借共享资源向上游传播；拖慢一个依赖，验证舱壁让无关接口保持稳态。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.11</span><span class="nm">消息积压</span><span class="sym">▁▂▃▄▅▆▇</span>
+  生产持续快于消费，欠债单调增长；停一个消费者，验证上游减量与追平时间告警。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<h3>一致性类 · 多份状态在时间与故障中分叉</h3>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.02</span><span class="nm">主从复制延迟</span><span class="sym">▁▁▃▁▁█▁</span>
+  主库已提交、副本仍旧；注入复制延迟，验证写后读主、确认中语义与延迟告警。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.03</span><span class="nm">缓存与 DB 双写不一致</span><span class="sym">▁▁▁▁▁</span>
+  两个系统在第二步失败时分叉；故意丢一次缓存失效，验证补偿重试与版本对账。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.12</span><span class="nm">消息丢失与重复</span><span class="sym">▁▁▁▁▁</span>
+  异步链路无性能症状却产生账实差异；注入重复与丢失，验证幂等、死信和对账。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.13</span><span class="nm">分布式锁失效</span><span class="sym">▁▁█▁▁</span>
+  租期、owner 或切换让互斥承诺失效；延长临界区超过租期，验证原子约束与持有者校验。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.14</span><span class="nm">脑裂</span><span class="sym">██‖██</span>
+  两边同时接受写入，产生并行真相；隔离链路时验证多数派、fencing 与 RPO 边界。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<h3>单点类 · 一处共享瓶颈让其余容量无法帮忙</h3>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.01</span><span class="nm">连接池耗尽</span><span class="sym">▁▂▅███</span>
+  有限连接池成为全部请求的共同闸门；注入慢查询，验证并发上限、获取超时和入口减量。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.10</span><span class="nm">热点分片</span><span class="sym">▁▁▁█▁▁</span>
+  一个分片独自过载，其他节点余量无法接力；注入热点 key，验证独立通道与二次打散。<a href="appendix-cards.html">附录图鉴 →</a>
+</div>
+
+<p>总检完成后，每张卡都应对应一个可执行实验：输入是什么、稳态看什么、爆炸半径多大、何时回滚、如何证明数据没有留下后遗症。附录图鉴是索引，游戏日计划才是处方。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">16 · 5 权衡</span>生产是真相，预发是护栏</h2>
+
+<p>今天这场游戏日注入的是<strong>可用性类</strong>故障——缓存节点掉线、依赖超时，坏了就降级，最坏结果是用户等得久一点。会后 Mia 问了下一个问题：<strong>数据一致性类</strong>的故障要不要也搬到生产上？跨机房复制中断、库存与订单对账偏离——这类实验一旦停止条件失效，赔上的不是可用性，是<em>数据</em>，而数据错了没有回滚按钮。</p>
+
+<p>三个方案都对，差别在于：<strong>你需要多强的证据、组织能承担多大爆炸半径，以及这一类实验错了之后还能不能收回来</strong>。最后这个维度，正是可用性类实验和数据类实验的分水岭。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>下一类实验是<strong>数据一致性故障注入</strong>。它应该停在预发，还是也进入生产？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    只在预发注入，生产不主动制造故障
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    直接在生产做游戏日，使用真实流量验证
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    分级晋升：本地 → 预发 → 影子 → 1% 生产 → 扩大范围
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 只在预发</b>：爆炸半径容易控制，可频繁验证注入工具、告警和回滚脚本，不影响真实用户。
+      <strong>账单：</strong>预发流量、数据量、依赖配额和网络拓扑常与生产不同，得到的是工具证据，不是生产稳态证据。适合团队刚起步、停止条件尚未自动化的阶段——<strong>也适合数据类实验的起步阶段</strong>：错了能重建环境，而不是去补生产账。
+    </p>
+    <p>
+      <b class="mid">B · 直接生产</b>：真实流量、真实依赖和真实容量共同参与，最容易暴露只在生产存在的耦合。
+      <strong>账单：</strong>未知项多，错误停止条件会把实验变事故。而且对数据类实验要说清楚一件事：<strong>自动化能做的是「停止注入 + 对旧写入 fencing + 切走流量」，它撤销不了已经写错的数据</strong>——所谓"自动回滚"在可用性类实验里成立，在数据类实验里只是止血。因此前置条件更硬：成熟单元化、自动停止与写入 fencing、<strong>事前就绪的审计 / 对账 / 修复流程</strong>、明确的 RPO，以及跨团队指挥。适合已多次演练同类故障、爆炸半径可硬隔离的组织——<strong>当某个耦合只在生产存在、预发怎么造都造不出来时，它是唯一能给出证据的选项</strong>。
+    </p>
+    <p>
+      <b class="mid">C · 分级晋升</b>：每一级都复用同一稳态假设、自动停止与写入 fencing 条件，以及对账与修复门禁；只有前一级证据通过才扩大真实度与范围。
+      <strong>账单：</strong>它<em>不是</em>免费的折中。数据类实验要走完这条晋升链，前提是先建出影子链路和对账门禁——这两样「秒抢」现在都没有，而它们本身就是季度级工程。<strong>在它们建成之前选 C，你实际拿到的只有预发那一级的证据，却付了 C 的治理成本。</strong>团队还可能在预发通过后迟迟不敢迈进生产，把分级变成拖延的正当理由。适合已具备影子链路与对账门禁、要把混沌工程做成长期能力的阶段。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：<strong>按实验类别分开定</strong>。可用性类故障（就是今天注入的那类）继续走 <strong>C</strong>——它已经走到 1% 生产流量这一级，证据链完整，继续扩大范围即可。数据一致性类故障先按 <strong>A</strong> 停在预发，同时把影子链路和对账门禁排进下个季度；等这两样建成，再让它进入 C 的分级通道。<strong>同一个组织在同一时间对两类实验采用不同成熟度，这不是不彻底，而是承认「错了能不能收回来」这件事，本来就该改变你的风险偏好。</strong>只有当某个数据类耦合被确认只在生产存在时，才付 B 的代价，并把爆炸半径硬隔离到单个单元。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">16 · 6 复盘</span>从一次可控失败，回望六年架构</h2>
+
+<p>回放第一次生产游戏日——顺序依旧是知识：先确认稳态，再注入，越线自动退，最后用数据决定是否扩大。</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">10:00</span>
+    <p><strong>锁定稳态。</strong>记录成功率 99.93%、P99 268ms、库存对账差异 0；确认实验单元只承接 1% 流量，回滚脚本已预执行。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:05</span>
+    <p><strong>注入节点不可用。</strong>单台缓存节点下线，命中率在实验单元短降，互斥回源与网关配额生效；核心成功率最低 99.61%，P99 峰值 438ms。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:08</span>
+    <p><strong>验证自动回滚。</strong>人为将实验阈值临时收紧到 P99 400ms，系统自动恢复节点并切走实验流量；42 秒内 P99 回到 280ms，对账仍为 0。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">10:20</span>
+    <p><strong>记录证据，不追求“扛住”。</strong>团队确认回源保护有效，也发现一个非核心推荐接口共享了实验缓存池；修复隔离前，不扩大到第二个单元。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>稳态必须写成机器能判断的条件。</strong>“大盘看起来正常”无法自动回滚；成功率、P99、对账差异和连续窗口才是可执行合同。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>实验成功不等于系统没有波动。</strong>真正的成功是波动留在预算内、停止条件有效、数据没有后遗症，并且团队获得可复用证据。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>容量规划要按故障后重算。</strong>正常态 0.67 不代表失去一个单元后仍安全；每种故障都要重新计算分母，而不是沿用健康集群容量。</div>
+  </div>
+</div>
+
+<h3>第 1 章的第 0 帧，与今天的最终形态</h3>
+
+<p>第 1 章说，后面每一章都在改那张基线图。现在把它与六年后的系统并排放回桌面：左边不是幼稚，右边也不是荣耀；它们分别是当时流量、团队与故障证据下，愿意支付的架构账单。</p>
+
+<div class="arch-layer">
+  <div class="arch">
+    <div class="arch-title">「秒抢」v1.0 · 上线当天的全部架构</div>
+    <div class="arch-flow">
+      <div class="arch-node"><div class="nn">浏览器</div><div class="nd">手机 H5</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node"><div class="nn">Nginx</div><div class="nd">反向代理<br>静态文件<br>TLS 终止</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node"><div class="nn">应用（单体）</div><div class="nd">一个进程<br>路由 / 业务 / 定时任务<br>全都在里面</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node db"><div class="nn">MySQL</div><div class="nd">一台<br>无从库<br>连接池 20</div></div>
+    </div>
+    <div class="arch-note">
+      没有的东西：缓存 · 消息队列 · 从库 · 网关 · 熔断 · 限流 · 监控大盘 · 第二台机器<br>
+      有的东西：一台 4 核 8G 云服务器，Nginx 和应用和 MySQL 挤在上面
+    </div>
+  </div>
+
+  <div class="arch">
+    <div class="arch-title">「秒抢」v16 · 被六年流量打出的最终形态</div>
+    <div class="arch-flow">
+      <div class="arch-node"><div class="nn">浏览器 / App</div><div class="nd">退避 · 凭证<br>多端会话</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node new"><div class="nn">CDN / WAF</div><div class="nd">静态化<br>风控前置</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node new"><div class="nn">网关 / 漏斗</div><div class="nd">限流 · 排队<br>降级 · 凭证</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node new"><div class="nn">服务单元</div><div class="nd">订单 · 库存 · 支付<br>熔断 · 舱壁 · 幂等</div></div>
+      <div class="arch-arrow"><span>→</span></div>
+      <div class="arch-node db"><div class="nn">数据层</div><div class="nd">缓存 · MQ · 分片<br>主从 · 多活 · 对账</div></div>
+    </div>
+    <div class="arch-layer">
+      <div class="arch-node new"><div class="nn">观测</div><div class="nd">metrics · traces · logs<br>症状与业务对账</div></div>
+      <div class="arch-node new"><div class="nn">容量</div><div class="nd">逐层预算<br>故障后水位重算</div></div>
+      <div class="arch-node new"><div class="nn">演练</div><div class="nd">稳态假设<br>注入 · 自动回滚</div></div>
+    </div>
+    <div class="arch-note">每一个新增方框都有病历：它不是因为架构图缺一块而出现，而是因为连接池、复制、缓存、重试、热点、消息、锁与机房曾经让系统付过账。</div>
+  </div>
+</div>
+
+<div class="kicker">第 1 章那台没有缓存、消息队列、从库、网关、熔断、限流、监控大盘和第二台机器的单体，并没有“设计错”。它完成了当时的任务。右边这张图也不是终点，它只是把过去的疼痛变成了今天的护栏。<strong>系统是被打出来的，但被打之前，你可以先打它。</strong></div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">16 · 7 自测</span>你敢按下按钮，也知道何时松手吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">网络隔离后，两边写入曲线呈 <span class="sym">██‖██</span>，两个单元都认为自己可写。最先要验证哪类护栏？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>缓存 TTL 抖动</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">B</span>多数派与 fencing，阻止两边同时持有写权限</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>扩大连接池</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>客户端增加重试</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">B。</b>双线分叉是 No.14 脑裂，核心是限制写权限而不是提高吞吐。D 很诱人，因为用户会看到失败，但重试只会把冲突写得更多；先用多数派与 fencing 收回过期主的权限。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 容量算术</h3>
+  <p class="stem">预估峰值 84 万 QPS，已压测验证容量 120 万 QPS。容量水位是多少，处于什么位置？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>0.30，余量很大</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>0.70，正好到红线</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>1.43，超过容量</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>36 万，不是比例</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b><code>84 ÷ 120 = 0.70</code>，已经触及红线。C 是最诱人的错误项，它把分子分母颠倒成 <code>120/84</code>；容量水位比较的是需求占验证容量的比例。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 实验顺序</h3>
+  <p class="stem">下面哪一组是混沌实验的正确顺序？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>注入 → 看告警 → 临时决定稳态 → 手工恢复</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>稳态假设 → 最小爆炸半径 → 注入 → 自动回滚</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>扩容 → 注入 → 删除日志 → 复盘</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>写复盘 → 注入 → 再决定影响范围</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b>先定义可证伪的稳态，再硬限制影响范围，注入后由机器执行停止条件。A 很诱人，因为许多临时演练确实这样做，但注入后才定义成功标准，会让团队按结果修改题目。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 故障后容量</h3>
+  <p class="stem">健康态验证容量 180 万 QPS，故障后只剩 135 万；预估峰值仍是 120 万。为什么不能继续沿用健康态 0.67？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>因为预估峰值会自动下降</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>分母已变，故障后水位约 0.89，余量不足</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>因为容量水位只在预发使用</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>因为故障时不需要限流</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b><code>120/135≈0.89</code>，健康集群的验证容量已经不是当前分母。A 是诱人的乐观假设，但故障不会替你减少用户需求；必须补容量或从入口减流。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「如何保障大促稳定性？」</b>
+    <span class="ans">答题骨架：峰值估算与故障后容量 → 分层漏斗与核心优先级 → 限流/熔断/舱壁 → 数据一致性与对账 → 预案演练 → 值班、回滚与复盘。</span>
+  </div>
+  <div class="iq">
+    <b>「混沌实验怎么起步？」</b>
+    <span class="ans">答题骨架：选已知故障与单一稳态指标 → 预发验证工具 → 最小生产单元 → 自动停止条件 → 一次只改一个变量 → 证据通过再扩大。</span>
+  </div>
+  <div class="iq">
+    <b>「容量规划怎么做？」</b>
+    <span class="ans">答题骨架：业务峰值与形状 → 压测验证容量 → 水位红线 0.7 → 按故障场景重算分母 → 补容量或减流 → 用生产指标持续校准。反直觉加分点：余量是可验证的故障预算。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="level4.html">← 实战关卡 4 · 多活与脑裂演练</a></span>
+    <span><a href="appendix-cards.html">全书病历卡总检 · 前往附录图鉴</a></span>
+    <span><a href="appendix-cards.html">附录 A · 病历卡图鉴 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

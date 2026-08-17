@@ -1,0 +1,48 @@
+<h2><span class="sec">09 · 4 模拟器</span>积压不会猜，它只做减法</h2>
+<p style="max-width:760px">让生产与总消费只差一点，观察水位如何持续爬升；再制造洪峰，用净消费速率直接算出多久能追平。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">BACKLOG SIMULATOR · 秒抢消息队列</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="积压水位、生产速率、总消费能力与积压告警线"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--amber)"></i>积压水位</span>
+    <span><i style="background:var(--red)"></i>生产速率</span>
+    <span><i style="background:var(--green)"></i>总消费能力</span>
+    <span>红色虚线 = 积压告警线</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">当前积压</div><div class="v" id="m-backlog">—</div></div>
+    <div class="sim-metric"><div class="k">当前生产</div><div class="v" id="m-produce">—</div></div>
+    <div class="sim-metric"><div class="k">总消费能力</div><div class="v" id="m-consume">—</div></div>
+    <div class="sim-metric"><div class="k">实际吞吐</div><div class="v" id="m-throughput">—</div></div>
+    <div class="sim-metric"><div class="k">按当前配置追平</div><div class="v" id="m-catchup">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-flood">🎫 开票洪峰</button>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>生产速率 <span id="lb-produce">100 /s</span></label>
+      <input type="range" id="sl-produce" min="10" max="1000" step="10" value="100"></div>
+    <div class="slider"><label>单消费者速率 <span id="lb-consume">95 /s</span></label>
+      <input type="range" id="sl-consume" min="1" max="1000" step="1" value="95"></div>
+    <div class="slider"><label>消费者数 <span id="lb-consumers">1 个</span></label>
+      <input type="range" id="sl-consumers" min="1" max="20" step="1" value="1"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>只差 5%。</strong>保持生产 100/s、单消费者 95/s、1 个消费者，静置 600 个模拟秒 → 水位单调不减、以恒定斜率上涨，末值超过起始基准的 5 倍。<strong>这条 ▁▂▃▄▅▆▇ 曲线不会自愈。</strong></li>
+    <li><strong>算出恢复时间。</strong>点「开票洪峰」，洪峰结束后把消费者从 1 个翻倍到 2 个 → 实测追平耗时与 `积压 ÷ (总消费 − 生产)` 的误差小于 10%。<strong>扩容效果可以算，不用猜。</strong></li>
+    <li><strong>找到空闲上限。</strong>把单消费者设为 100/s，分别用 3 个和 5 个消费者清理同量积压 → 5 个追平更快，但清零后两者实际吞吐都只剩 100/s。<strong>继续堆消费者没有吞吐收益；真实上限还受分区数与下游写入能力约束。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->

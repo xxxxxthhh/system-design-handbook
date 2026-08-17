@@ -1,0 +1,47 @@
+<h2><span class="sec">07 · 4 模拟器</span>好心如何乘成一场风暴</h2>
+<p style="max-width:760px">把入口请求沿调用链逐层展开：重试次数在末端相乘，backoff 与 jitter 只重排请求到达时间，不会凭空消掉请求。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">RETRY STORM SIMULATOR · 秒抢调用链</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="末端到达 QPS 波形与重试放大倍数"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--red)"></i>末端到达 QPS</span>
+    <span><i style="background:var(--amber)"></i>期望放大倍数（虚线）</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">期望放大</div><div class="v" id="m-amplification">—</div></div>
+    <div class="sim-metric"><div class="k">末端瞬时到达</div><div class="v" id="m-terminal">—</div></div>
+    <div class="sim-metric"><div class="k">累计末端请求</div><div class="v" id="m-cumulative">—</div></div>
+    <div class="sim-metric"><div class="k">待发重试事件</div><div class="v" id="m-pending">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-failure">💥 注入下游故障</button>
+    <label class="toggle"><input type="checkbox" id="tg-backoff">backoff</label>
+    <label class="toggle"><input type="checkbox" id="tg-jitter">jitter</label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>调用层数 <span id="lb-layers">3 层</span></label>
+      <input type="range" id="sl-layers" min="1" max="4" step="1" value="3"></div>
+    <div class="slider"><label>每层尝试次数 <span id="lb-retries">3 次</span></label>
+      <input type="range" id="sl-retries" min="1" max="4" step="1" value="3"></div>
+    <div class="slider"><label>下游故障率 <span id="lb-failure">100%</span></label>
+      <input type="range" id="sl-failure" min="0" max="100" step="1" value="100"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>看乘法。</strong>保持每层 3 次、故障率 100%，把层数设为 1、2、3 并分别注入 → 末端放大依次为 3、9、27（误差小于 5%）。<strong>重试是指数放大，不是逐层相加。</strong></li>
+    <li><strong>摊开尖峰。</strong>保持 3 层 × 3 次，先关闭 backoff 注入，再重置、开启 backoff 注入 → 累计请求数变化不到 10%，但峰值下降超过 40%。<strong>backoff 治瞬时峰，不治总量。</strong></li>
+    <li><strong>打散同步。</strong>保持 backoff 开启，再打开 jitter 并重置注入 → 峰值严格低于只开 backoff 时。<strong>±50% 扰动打散同刻重发，是惊群效应的解药。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->

@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 9 章 · 消息队列——削峰填谷 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch08.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch10.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 3 · 分布式深水区 · 第 9 章</div>
+    <h1>消息队列<br>削峰填谷</h1>
+    <p class="h1-sub">消息队列替下单链路扛住了开票洪峰，也把失败藏进了一条更长的时间轴。你会学会看积压斜率、算追平时间，并为丢失、重复与乱序逐项交账。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">09 · 1 值班现场</span>01:30，队列水位还在往上爬</h2>
+
+<p class="lead">创业第 3 年，「秒抢」累计用户约 300 万，公司 160 人，后端 30 人。一个月前，开票瞬间的同步写洪峰打垮过下单链路；团队把订单落库、短信和出票拆到消息队列后面，白天的大盘终于变平。然后，半夜 01:30，手机把你从睡梦里拽起来。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 01:30:18</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] order-events backlog <span class="a">4,820,000</span>（阈值 500,000）<br>
+[<span class="r">CRITICAL</span>] oldest-message-age <span class="a">11m 42s</span>（阈值 120s）<br>
+[<span class="a">WARNING</span>] &nbsp;consumer throughput <span class="a">7,000/s</span>，producer rate 12,000/s<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">队列平台最后一条变更：</span><br>
+<span class="t">「00:55 推荐画像补算任务启动，复用 order-events 消费集群」</span>
+  </div>
+</div>
+
+<p>你打开队列、消费者和订单库三张大盘。四个数字已经足够排除「消息系统挂了」这个直觉：</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">生产速率</div>
+    <div class="v">12,000/s</div>
+    <div class="d up">▲ 平时约 6,500/s</div>
+  </div>
+  <div class="metric">
+    <div class="k">消费速率</div>
+    <div class="v">7,000/s</div>
+    <div class="d warn">● 低于生产 5,000/s</div>
+  </div>
+  <div class="metric">
+    <div class="k">分区 / 活跃消费者</div>
+    <div class="v">12 / 12</div>
+    <div class="d warn">● 并行槽已占满</div>
+  </div>
+  <div class="metric">
+    <div class="k">订单库写入 P99</div>
+    <div class="v">38ms</div>
+    <div class="d down">● 下游仍健康</div>
+  </div>
+</div>
+
+<p>消息没有停产，消费者也没有归零；问题是前者每秒比后者多 5,000 条。按这个斜率，每分钟净增 30 万条，4,820,000 条积压只需要约 16 分钟就能形成。分区数和活跃消费者又恰好都是 12，说明再启动一批同组消费者，部分实例只会空等分区。</p>
+
+<p>阿凯在电话里报出另一条线索：画像补算把单条消费的外部查询从 2 次推到 7 次，消费吞吐从约 11,000/s 掉到 7,000/s。队列只是水库；真正变窄的是出水口。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 01:33。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立刻再启动 50 个消费者实例，用数量把积压压下去
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    清空当前积压，让新订单先恢复实时消费
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    暂停画像补算，恢复原消费路径；同时限住非核心生产者并核对分区上限
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    把消息保留期从 24 小时延长到 72 小时，先避免过期
+  </button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">C 是教科书答案：先让斜率改符号。</b>暂停补算能把单条消费成本拉回基线；限制非核心生产者能立刻缩小流入。确认分区与下游余量后再扩消费者，才有可能让消费速率超过生产速率。目标不是让水位看起来小一点，而是先让它开始下降。</p>
+    <p><b class="bad">A 的问题是并行度账单没算。</b>12 个分区已经分给 12 个活跃消费者，同一消费组再加 50 个实例不会凭空多出分区；即便扩分区，订单库和外部查询也未必能接住新增并发。实例数不是消费能力的同义词。</p>
+    <p><b class="bad">B 会把延迟事故变成数据事故。</b>队列里的 482 万条包含订单、出票和通知状态。直接清空会让它们失去处理机会，监控曲线会瞬间变绿，对账单却会在天亮后变红。</p>
+    <p><b class="mid">D 方向没错，但救不了现在。</b>延长保留期是在购买处理时间，适合防止积压尚未追平就过期；它既不降低生产速率，也不提高消费速率。先止住增长，再给恢复窗口加保险。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">09 · 2 原理</span>削峰不是消峰，只是把账单挪到以后</h2>
+
+<p>消息队列把同步链路拆成两个时钟：生产者按自己的速度写入消息，消费者按自己的能力处理。只要短时洪峰之后消费能力重新高于生产，队列就能把尖峰摊平；如果消费长期低于生产，水库会按固定斜率上涨。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+积压增长速率 = 生产速率 − 消费速率<br>
+追平时间 = 当前积压量 ÷ ( 消费速率 − 生产速率 )
+  </div>
+</div>
+
+<p>先代入告警现场：12,000/s − 7,000/s = 5,000/s。只要这个差值保持为正，积压每秒净增 5,000 条；扩大保留期只能让水库晚一点漫出来，不能改变水位方向。</p>
+
+<p>再代入恢复剧本。假设经过限流和扩容，当前积压正好 500 万条，生产回落到 8,000/s，消费提升到 10,000/s：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">当前积压</div>
+    <div class="v" style="color:var(--amber)">5,000,000</div>
+    <div class="d">条待处理消息</div>
+  </div>
+  <div class="metric">
+    <div class="k">生产速率</div>
+    <div class="v">8,000/s</div>
+    <div class="d">恢复期仍在流入</div>
+  </div>
+  <div class="metric">
+    <div class="k">消费速率</div>
+    <div class="v" style="color:var(--green)">10,000/s</div>
+    <div class="d">净消费 2,000/s</div>
+  </div>
+  <div class="metric">
+    <div class="k">预计追平</div>
+    <div class="v" style="color:var(--teal)">约 42 分钟</div>
+    <div class="d">5,000,000 ÷ 2,000</div>
+  </div>
+</div>
+
+<p>计算结果是 2500 秒 ≈ 42 分钟（精确到小数约 41.7 分钟）。最容易犯的错，是用 500 万 ÷ 10,000 得出 500 秒：这忽略了恢复期间每秒仍有 8,000 条新消息进入。消费者的前 8,000/s 只是追上当下，只有多出来的 2,000/s 在偿还旧债。</p>
+
+<div class="kicker">队列水位只认净速率。生产与消费只差 5%，也会画出一条不回落的斜线；消费能力翻倍，也要先减掉持续流入，剩下的才是还债速度。</div>
+
+<p>吞吐之外，消息系统还要同时处理三种语义账单：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>难题</th>
+        <th>它怎么发生</th>
+        <th>可执行护栏</th>
+        <th>别被什么骗了</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>丢失</strong></td>
+        <td>生产确认前进程退出、队列未持久化、消费先确认后处理失败</td>
+        <td>生产确认、持久化副本、处理成功后确认、对账补发</td>
+        <td>发送接口返回成功，不等于业务结果已落地</td>
+      </tr>
+      <tr>
+        <td><strong>重复</strong></td>
+        <td>消费者处理成功但确认丢失，队列按 at-least-once 再投一次</td>
+        <td>业务幂等键、数据库 UNIQUE 约束、处理结果表</td>
+        <td>去重不能只放进程内存，重启会忘记历史</td>
+      </tr>
+      <tr>
+        <td><strong>乱序</strong></td>
+        <td>相关消息落到不同分区，或失败重试让后发消息先完成</td>
+        <td>同一业务键进同一分区、版本号、状态机拒绝倒退</td>
+        <td>全局顺序代价很高，多数业务只需要 key 内有序</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>失败消息也不能在主队列里无休止打转。连续重试会占住分区、拖慢后续健康消息，还可能反复轰击已经不健康的下游。常见做法是限定重试次数并逐步退避，超过阈值后送入<strong>死信队列</strong>：保留原消息、失败原因、重试次数和追踪标识，由告警、人工修复或补偿任务接管。</p>
+
+<p>死信队列不是垃圾桶。它是一张待处理病历：如果没人监控数量、年龄和恢复路径，消息只是从主队列的可见积压，搬进了另一个更安静的积压。</p>
+
+<p>订单创建也常采用异步落库：入口先完成资格校验与排队，再由消费者写订单。这条路能把写洪峰削平，但用户拿到的是「已受理」而不是「已成功」。第 10 章会继续追问：当异步消费者真正扣库存时，怎样避免并发请求把同一张票卖两次。</p>
+
+<p>而 at-least-once 的重复投递并不是异常边角，它是可靠交付用重复换丢失的正常账单。第 11 章会正面解决业务幂等：如果同一消息来两次，第二次必须只返回第一次的结果，不能再制造一笔订单。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">09 · 3 病历卡</span>一条曲线看得见，一条只能靠对账</h2>
+
+<p>消息系统最危险的两类病，一类把水位画在大盘上，另一类把大盘保持得过分安静。前者靠速率诊断，后者靠业务账本诊断。</p>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>消息积压</h3>
+    <span class="case-no">病历卡 No.11</span>
+  </div>
+  <div class="case-alias">Message Backlog · 消费长期追不上生产</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">生产速率持续高于消费速率，差值逐秒累积成待处理消息；消费变慢、分区并行度不足、下游限速或毒消息反复重试，都可能让出水口变窄。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▂▃▄▅▆▇</span>　单调爬升不回落型。backlog 与 oldest-message-age 同向上涨；生产和消费都不为零，但消费曲线长期压在生产曲线下方。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">开票洪峰；消费者发布后性能退化；分区数限制并行度；下游数据库限流；补算任务与在线消息争用同一消费集群。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>先改斜率</strong>：限制非核心生产并恢复消费性能；② <strong>按瓶颈扩容</strong>：分区、消费者和下游容量一起核算；③ <strong>算恢复窗口</strong>：用净消费速率估算追平时间；④ <strong>隔离毒消息</strong>：有限重试后转死信。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」本次事故中，画像补算把消费吞吐压到 7,000/s，而生产维持 12,000/s；队列以 5,000/s 的净速率增长，积压达到 482 万条，最老消息等待超过 11 分钟。</div>
+    </div>
+  </div>
+</div>
+
+<div class="case-card no5">
+  <div class="case-head">
+    <h3>消息丢失与重复</h3>
+    <span class="case-no">病历卡 No.12</span>
+  </div>
+  <div class="case-alias">Lost or Duplicate Delivery · 传输成功不等于业务只执行一次</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">确认边界与业务提交不在同一个原子事务里：确认太早，处理失败后消息丢失；确认太晚，处理成功但确认丢失后消息会再次投递。可靠系统通常要明确选择偏向哪一侧，再由业务补齐另一侧。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁▁▁▁</span>　无症状型——只有对账能发现。队列吞吐、延迟和错误率都可能正常，业务侧却出现订单缺口、重复出票或同一幂等键多条结果。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">消费者在业务提交与消息确认之间崩溃；网络超时让生产者不确定发送结果；人工重放死信；跨系统补偿任务重复执行。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>偏向 at-least-once</strong>：处理成功后再确认；② <strong>业务幂等</strong>：请求方生成稳定幂等键，数据库 UNIQUE 约束兜底；③ <strong>端到端对账</strong>：按订单、支付、出票三本账找缺口；④ <strong>可控重放</strong>：重放保留原键与追踪链。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」曾在消费者滚动发布时出现确认回包丢失：队列再次投递了已完成的出票消息。队列大盘全绿，直到订单与票权日终对账出现重复记录，团队才发现防重只存在进程内存里。</div>
+    </div>
+  </div>
+</div>
+
+<p>两张卡要一起看：<span class="sym">▁▂▃▄▅▆▇</span> 告诉你系统欠了多少时间债，<span class="sym">▁▁▁▁▁</span> 提醒你监控安静不等于业务账平。队列指标负责发现流动问题，对账负责发现结果问题。</p>
+
+</div><!-- /wrap -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">09 · 4 模拟器</span>积压不会猜，它只做减法</h2>
+<p style="max-width:760px">让生产与总消费只差一点，观察水位如何持续爬升；再制造洪峰，用净消费速率直接算出多久能追平。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">BACKLOG SIMULATOR · 秒抢消息队列</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="积压水位、生产速率、总消费能力与积压告警线"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--amber)"></i>积压水位</span>
+    <span><i style="background:var(--red)"></i>生产速率</span>
+    <span><i style="background:var(--green)"></i>总消费能力</span>
+    <span>红色虚线 = 积压告警线</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">当前积压</div><div class="v" id="m-backlog">—</div></div>
+    <div class="sim-metric"><div class="k">当前生产</div><div class="v" id="m-produce">—</div></div>
+    <div class="sim-metric"><div class="k">总消费能力</div><div class="v" id="m-consume">—</div></div>
+    <div class="sim-metric"><div class="k">实际吞吐</div><div class="v" id="m-throughput">—</div></div>
+    <div class="sim-metric"><div class="k">按当前配置追平</div><div class="v" id="m-catchup">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-flood">🎫 开票洪峰</button>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>生产速率 <span id="lb-produce">100 /s</span></label>
+      <input type="range" id="sl-produce" min="10" max="1000" step="10" value="100"></div>
+    <div class="slider"><label>单消费者速率 <span id="lb-consume">95 /s</span></label>
+      <input type="range" id="sl-consume" min="1" max="1000" step="1" value="95"></div>
+    <div class="slider"><label>消费者数 <span id="lb-consumers">1 个</span></label>
+      <input type="range" id="sl-consumers" min="1" max="20" step="1" value="1"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>只差 5%。</strong>保持生产 100/s、单消费者 95/s、1 个消费者，静置 600 个模拟秒 → 水位单调不减、以恒定斜率上涨，末值超过起始基准的 5 倍。<strong>这条 ▁▂▃▄▅▆▇ 曲线不会自愈。</strong></li>
+    <li><strong>算出恢复时间。</strong>点「开票洪峰」，洪峰结束后把消费者从 1 个翻倍到 2 个 → 实测追平耗时与 `积压 ÷ (总消费 − 生产)` 的误差小于 10%。<strong>扩容效果可以算，不用猜。</strong></li>
+    <li><strong>找到空闲上限。</strong>把单消费者设为 100/s，分别用 3 个和 5 个消费者清理同量积压 → 5 个追平更快，但清零后两者实际吞吐都只剩 100/s。<strong>继续堆消费者没有吞吐收益；真实上限还受分区数与下游写入能力约束。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->
+<div class="wrap">
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">09 · 5 权衡</span>可靠投递的两份正确账单</h2>
+
+<p>复盘会上，团队要为订单事件写下一句可以验收的交付承诺。两条路都能成立，但责任边界不同：一条承认重复，把正确性放进业务；另一条购买组件提供的事务语义，把约束留在受支持的边界里。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>订单消息应该选择哪种交付语义？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    at-least-once + 业务幂等：允许重复投递，业务结果只生效一次
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    组件 exactly-once：在组件支持的事务边界内提交消费位点与处理结果
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    分级策略：订单核心链路走 A，纯流式统计在可控边界内使用 B
+  </button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · at-least-once + 业务幂等</b>：跨队列、数据库和补偿任务都能沿用同一个业务键，失败后放心重投。<strong>账单：</strong>每个有副作用的消费者都要实现幂等，保存处理记录并承担存储与清理成本；漏一个入口就可能重复扣款。适合跨系统、结果可由业务键约束的订单链路。</p>
+    <p><b class="mid">B · 组件 exactly-once</b>：在同一流处理事务边界内，位点和结果可以一起提交，应用代码更简洁。<strong>账单：</strong>承诺通常止于组件边界；一旦调用外部支付、数据库或人工补偿，端到端仍需幂等。适合输入输出都留在受支持组件内的流式聚合。</p>
+    <p><b class="mid">C · 分级策略</b>：按副作用范围选择语义，不让核心订单迁就统计任务，也不让简单聚合背负完整业务账本。<strong>账单：</strong>平台要维护两套运行手册、监控和故障演练，团队必须说清每条链路的承诺边界。适合消息类型多、治理能力成熟的团队。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：订单、支付、出票采用 <strong>A</strong>，由请求方业务键贯穿生产、消费、死信与补偿，数据库 UNIQUE 约束做最后护栏；实时看板聚合在边界明确时采用 <strong>B</strong>。理由是核心链路跨越数据库和外部系统，不能把端到端正确性寄托在队列组件的一段承诺上。第 11 章会把这套幂等账本完整展开。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">09 · 6 复盘</span>那 47 分钟后来怎么还完了</h2>
+
+<p>回放 01:30 的正确剧本——先让水位转向，再扩大净消费能力，最后核对结果而不是只看 backlog 归零：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">01:33</span>
+    <p><strong>停止继续变窄。</strong>暂停画像补算并限住非核心事件；单条消费外部查询从 7 次恢复到 2 次，消费速率升到 9,600/s，生产回落到 8,100/s，积压曲线第一次转向。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">01:38</span>
+    <p><strong>按瓶颈扩容。</strong>确认订单库写入余量后，将分区从 12 扩到 20，再把活跃消费者升到 20；消费稳定在约 12,000/s，净还债速度接近 4,000/s。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">01:41</span>
+    <p><strong>算出恢复窗口。</strong>按剩余积压与实时净消费速率估算约 19 分钟追平（此刻约 446 万条 ÷ 净 4,000/s ≈ 1,115 秒），把客服口径从「系统异常」改为「出票延迟，订单已受理」，并延长消息保留期作为保险。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">02:17</span>
+    <p><strong>对账后解除。</strong>backlog 已于约 02:00 归零、最老消息年龄回到秒级；团队再核对订单、支付与票权数量，处理 37 条死信后才关闭事件，而不是看到队列清空就宣布恢复。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>先看斜率，再看水位。</strong>500 万积压若净消费为正，是一笔可计算的时间债；50 万积压若仍以 5,000/s 增长，才是正在扩大的事故。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>消费者数量受三道上限约束。</strong>分区提供并行槽，下游提供写入容量，单条处理成本决定每槽速度。只加实例，常常只会买到更多空闲进程。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>队列归零不是业务账平。</strong>丢失与重复的曲线可能保持平坦；恢复结束前必须对订单、支付、出票和死信做端到端核对。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">09 · 7 自测</span>你能看懂水位背后的速率吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">队列 backlog 呈 <span class="sym">▁▂▃▄▅▆▇</span>，生产稳定在 10,000/s，消费稳定在 9,500/s，错误率接近零。最准确的判断是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>消费能力长期少 5%，积压会按 500/s 单调增长</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>错误率为零，队列会自行恢复</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>这是消息丢失的直接证据</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>只要延长保留期，增长速率就会下降</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>形状与 500/s 的正差值对应 No.11 消息积压。B 很诱人，因为两个组件都在工作，但只要消费仍低于生产，时间不会替系统还债；D 只扩大容器，不改变流入和流出；C 需要业务对账证据，不能从积压曲线直接推出。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 追平时间算术</h3>
+  <p class="stem">积压 500 万条，生产 8,000/s，消费 10,000/s。忽略速率波动，约多久追平？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>500 秒，约 8 分钟</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>2,500 秒，约 42 分钟</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>625 秒，约 10 分钟</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>无法追平，因为生产仍大于零</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b>净消费速率是 10,000 − 8,000 = 2,000/s，5,000,000 ÷ 2,000 = 2,500 秒，约 41.7 分钟。A 是最诱人的错误项，它直接除以总消费速率，漏掉了恢复期间持续进入的新消息。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 扩容边界</h3>
+  <p class="stem">一个消费组有 12 个分区和 12 个活跃消费者。下游容量未确认时，再启动 30 个同组消费者，最可能先发生什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>吞吐立刻变成原来的 3.5 倍</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>多出的消费者拿不到分区，吞吐基本不变</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>消息会自动变成全局有序</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>积压会被队列自动删除</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b>同一消费组的并行度先受分区数约束，多出的实例会空闲。A 把进程数当成服务能力，忽略分区与下游两道上限；扩分区后也必须重新核对顺序键和数据库容量，不能只追求消费者数量。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 交付语义</h3>
+  <p class="stem">消费者已写入订单库，但发送确认前进程退出，消息随后被再次投递。最稳妥的业务护栏是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>收到第二次投递时直接丢弃，不查业务状态</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>用稳定幂等键查询或写入，返回第一次处理结果</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>把确认提前到业务处理之前</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>关闭消息重投机制</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>这是 at-least-once 的正常重复窗口，稳定幂等键能把两次投递收敛成一个业务结果。C 看似消除了重复，却把处理失败变成消息丢失；A 和 D 都在没有业务证据时放弃可靠交付。具体实现会在第 11 章展开。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「MQ 如何保证消息不丢？」</b>
+    <span class="ans">答题骨架：生产确认 → 队列持久化与副本 → 消费成功后确认 → 失败重试与死信 → 业务对账补发。先声明保证边界，再说明跨系统不能只靠一个组件承诺。</span>
+  </div>
+  <div class="iq">
+    <b>「消息积压了怎么办？」</b>
+    <span class="ans">答题骨架：生产/消费差值定方向 → oldest age 定影响 → 限制非核心生产 → 找消费瓶颈 → 按分区与下游余量扩容 → 算追平时间 → 清零后对账。</span>
+  </div>
+  <div class="iq">
+    <b>「消息顺序性怎么保证？」</b>
+    <span class="ans">答题骨架：先问全局还是业务键内有序 → 同 key 路由同分区 → 单分区串行或版本校验 → 重试不允许状态倒退 → 说明热点键与吞吐账单。反直觉加分点：多数订单系统需要的是聚合内有序，不是全局排队。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch08.html">← 第 8 章 · 分库分表——以及热点分片</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.11–12 已收录于附录图鉴</a></span>
+    <span><a href="ch10.html">第 10 章 · 超卖！——库存一致性 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-6.js"></script>
+</body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实战关卡二 · AWS S3 2017：一个参数与四个小时 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar"><span><b>系统是被打出来的</b> · 系统设计实战手册</span><nav aria-label="章节导航"><a href="ch07.html">← 上一章</a><a href="index.html">目录</a><a href="ch08.html">下一章 →</a></nav></div>
+  <div class="chapter-head">
+    <div class="eyebrow">🔥 实战关卡二 · 真实事故 · PART 2 收官</div>
+    <h1>AWS S3 2017<br>一个参数与四个小时</h1>
+    <p class="h1-sub">一位获授权的工程师，按既有操作手册，执行了一条常规命令——只是有一个输入填错了。这一关不讲"要小心"，讲的是当小心失效之后，<strong>系统还剩什么</strong>。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="disclaimer">
+  <b>关于本页的事实边界：</b>本页根据 AWS 官方公开复盘改编，细节经过叙事化处理。
+  技术事实、时间线与决策链均取自页末所列官方原始文档，每个事实性陈述后以
+  <span class="srcref">[S1]</span> 标注出处；氛围与心理描写为叙事化补充，<b>不代表当事人的真实言行</b>。
+  本页<b>不出现真实人物姓名，不虚构任何人物台词，不指名批评任何个人</b>。
+  关于本次事故影响范围的坊间说法未被采信——本页只写官方复盘点名的受影响服务。
+</div>
+
+<!-- ================= 现场 ================= -->
+<h2><span class="sec">关卡 2 · 1 现场</span>9:37AM，一条按手册执行的命令</h2>
+
+<p class="lead">2017 年 2 月 28 日上午，美国东部（US-EAST-1）区域。S3 团队正在排查一个不算紧急的问题：<strong>计费系统跑得比预期慢</strong> <span class="srcref">[S1]</span>。</p>
+
+<p>处理方式很常规——下线计费流程用到的某个 S3 子系统的少量服务器，重新调度。这类操作有既定的操作手册（playbook），执行的人有授权，动作本身是 S3 的<strong>核心运维流程之一</strong> <span class="srcref">[S1]</span>。</p>
+
+<p><strong>9:37AM PST</strong>，命令执行。<em>其中一个输入参数填错了，被移除的服务器比预期多得多</em> <span class="srcref">[S1]</span>。</p>
+
+<div class="kicker">请先把这四个限定词读三遍：<strong>获授权的人</strong>、<strong>按既有手册</strong>、<strong>常规操作</strong>、<strong>本意只移除少量</strong>。这四条全部成立 <span class="srcref">[S1]</span>，事故照样发生了。<br><br>这就是为什么本关卡的教学重点不是"要仔细"——仔细已经在场了，而且它输了。</div>
+
+<h3>为什么多删几台机器会让半个区域停下来</h3>
+
+<p>被误删的那批服务器，同时支撑着另外两个 S3 子系统 <span class="srcref">[S1]</span>。它们的名字值得记住，因为它们的关系是这一关的技术骨架：</p>
+
+<div class="arch">
+  <div class="arch-title">S3 的两个子系统与它们的依赖方向</div>
+  <div class="arch-flow">
+    <div class="arch-node"><div class="nn">GET / LIST<br>DELETE</div><div class="nd">只需要 index</div></div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node db"><div class="nn">index 子系统</div><div class="nd">管理该区域内<br><strong>所有对象</strong>的<br>元数据与位置<br><em>GET/LIST/PUT/DELETE 全都要它</em></div></div>
+  </div>
+  <div class="arch-flow" style="margin-top:10px">
+    <div class="arch-node"><div class="nn">PUT</div><div class="nd">还要分配新存储</div></div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node db"><div class="nn">placement 子系统</div><div class="nd">分配新存储<br><strong>要求 index 正常</strong></div></div>
+  </div>
+  <div class="arch-note">
+    index 子系统是<strong>所有</strong> GET / LIST / PUT / DELETE 请求的必经之路 <span class="srcref">[S1]</span>；<br>
+    placement 只在 <strong>PUT</strong> 时用于给新对象分配存储，且<strong>要求 index 先正常工作</strong> <span class="srcref">[S1]</span>。<br>
+    所以恢复必然分两步：index 先活，读类请求才能恢复；placement 随后才能开始恢复，PUT 最后回来。
+  </div>
+</div>
+
+<p>移除了相当大比例的容量，导致这两个子系统<strong>都必须完整重启</strong>。重启期间，S3 无法服务请求 <span class="srcref">[S1]</span>。</p>
+
+<p>同区域内依赖 S3 的其它 AWS 服务随之受影响。官方复盘点名的是：<strong>S3 控制台、EC2 新实例启动、EBS 卷（当需要从 S3 快照取数据时）、AWS Lambda</strong> <span class="srcref">[S1]</span>。</p>
+
+<div class="pager" aria-label="事故影响面">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>US-EAST-1 · 2017-02-28 · 09:37 PST 起</div>
+  <div class="pager-body">
+[<span class="r">DOWN</span>] index 子系统 —— <span class="r">全量重启中</span>，GET / LIST / PUT / DELETE 全部不可用<br>
+[<span class="r">DOWN</span>] placement 子系统 —— <span class="g">排队等待 index 恢复</span>（依赖它才能启动）<br>
+[<span class="a">IMPACT</span>] S3 控制台 · EC2 新实例启动 · EBS（需 S3 快照时）· AWS Lambda<br>
+<span class="g">──────────────────────────────────────</span><br>
+[<span class="r">BLIND</span>] AWS Service Health Dashboard —— <span class="r">无法更新各服务状态</span><br>
+<span class="g">原因：SHD 管理控制台依赖 S3。</span>
+  </div>
+</div>
+
+<h3>最后那一行才是这一关最贵的教训</h3>
+
+<p>从事故开始一直到 <strong>11:37AM PST</strong>，AWS <strong>无法在自己的状态页上更新各服务状态</strong>，因为 SHD 管理控制台依赖 S3 <span class="srcref">[S1]</span>。团队只能改用推特账号和状态页顶部的横幅文字通报 <span class="srcref">[S1]</span>。</p>
+
+<p>也就是说：<strong>那个专门用来在出事时告诉大家"出了什么事"的系统，被同一场事故一起放倒了</strong>——整整两个小时。这就是<em>依赖自举问题</em>：你的应急工具建在了它要报告的那个东西上面。</p>
+
+<!-- ================= 决策点 ================= -->
+<h2><span class="sec">关卡 2 · 2 决策点</span>护栏该怎么设计</h2>
+
+<p>假设你是「秒抢」的 SRE，负责设计集群容量的下线工具。你完全知道 AWS 这一课。<strong>但护栏不是免费的</strong>——每一道护栏都会让日常运维变慢、变烦，而烦到一定程度，人会绕过它。下面三个决策，每一个都有真实的代价。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>下线工具的第一道护栏，你先加哪个？</h3>
+  <button class="opt" data-d="1" data-k="mid"><span class="tag">A</span>二次确认：执行前把「将要移除 N 台，剩余 M 台」打印出来，要求人工输入确认</button>
+  <button class="opt" data-d="1" data-k="good"><span class="tag">B</span>最小保留量：任何会让子系统低于其最小所需容量的移除，工具直接拒绝执行</button>
+  <button class="opt" data-d="1" data-k="mid"><span class="tag">C</span>速率限制：把移除动作拆成小批，每批之间强制间隔并复查健康度</button>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">D</span>权限收紧：只有资深工程师才能执行下线命令</button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B 优先，因为它是唯一一个「人错了也不生效」的护栏。</b>AWS 事后做的正是这件事：增加安全检查，<em>当移除会让任一子系统低于其最小所需容量时，禁止移除</em>，并明确说这将阻止一次错误输入再度引发同类事件 <span class="srcref">[S1]</span>。注意它的性质——A 和 C 都要求人在正确的时刻做出正确反应，B 不需要人参与判断。<strong>在同等成本下，能自动执行的约束优先于需要人配合的约束。</strong></p>
+    <p><b class="mid">A 有价值，但它不能<em>保证</em>拦截。</b>把「将移除 N 台、剩余 M 台」打印出来，确实有机会让人看见异常大的 N 或异常小的 M 而停手——这正是影响预览的价值。但它的拦截率取决于人在那一刻的注意力：确认界面会忠实地打印那个错误的数字，而执行者往往会确认它，因为他相信自己填的是对的。这和关卡一里"再看一眼窗口标题"是同一类问题：<strong>确认环节提供的是发现错误的<em>机会</em>，不是拦截错误的<em>保证</em></strong>——在疲劳、预期偏差或时间压力下，人往往看见了却没停手。所以它适合作为 B 的可读性补充，而不是唯一防线：<strong>概率性的人工护栏，替代不了确定性的硬约束。</strong></p>
+    <p><b class="mid">C 是 AWS 实际做的另一半，价值很大但排第二。</b>AWS 的原话是这个工具「允许移除的容量太多、太快」，因此他们把它改成<em>更慢地移除容量</em> <span class="srcref">[S1]</span>。速率限制的作用是<strong>把"瞬间的错误"变成"有时间发现的错误"</strong>——它不阻止你犯错，它给你留出后悔的窗口。之所以排在 B 后面：如果最小保留量守住了，速率限制只是锦上添花；反过来则不然。</p>
+    <p><b class="bad">D 是最常见、也最没用的一类"改进"。</b>这次执行命令的人<em>本来就是获授权的、按既有手册操作的</em> <span class="srcref">[S1]</span>。收紧权限会把操作集中到更少的人身上，让这些人更疲惫、更常在深夜被叫起来——关卡一已经演示过疲劳的代价。<strong>把安全寄托在"只让厉害的人碰"，等于承认你没有护栏。</strong></p>
+  </div>
+</div>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>「秒抢」的核心子系统已经三年没有完整重启过了。你怎么办？</h3>
+  <button class="opt" data-d="2" data-k="bad"><span class="tag">A</span>不动它。三年没重启说明它很稳定，重启只会引入风险</button>
+  <button class="opt" data-d="2" data-k="good"><span class="tag">B</span>安排一次<strong>计划内</strong>的完整重启演练，在低峰期做，并计时</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">C</span>把它拆成更小的独立单元，让"重启一部分"成为可能</button>
+  <button class="opt" data-d="2" data-k="bad"><span class="tag">D</span>写一份详细的重启预案文档，出事时照着做</button>
+  <div class="verdict" id="v-d2">
+    <p><b class="good">B。</b>这正是本次事故最反直觉的一课。AWS 的系统<em>本来就是按"容量会失效"设计的</em>，移除并替换容量是核心运维流程 <span class="srcref">[S1]</span>。真正的问题是：在较大的区域里，这两个子系统<strong>已经很多年没有被完整重启过</strong>；而 S3 这些年增长巨大，重启并跑完元数据完整性校验，<em>比预期花的时间长</em> <span class="srcref">[S1]</span>。<strong>一个从未被完整重启过的系统，它的重启时长是一个未知数——而未知数会在最糟的时刻被测量。</strong>计时是关键：演练的产出不是"能启动"，是<em>那个数字</em>。</p>
+    <p><b class="bad">A 是这一关最危险的选项，因为它的推理看起来完全正确。</b>"三年没出事"确实是稳定性的证据——但它同时也是<em>无知的证据</em>：你不知道它重启要多久，不知道启动时的依赖顺序对不对，不知道那些年里悄悄增长的数据量会让校验跑多久。<strong>「很久没重启过」不是稳定的勋章，是一笔在计息的债。</strong>它迟早要被重启，区别只在于是你选的时间，还是它选的时间。</p>
+    <p><b class="mid">C 是正确的长期方向，也正是 AWS 的规划。</b>他们把服务拆成称为 <em>cell</em> 的小分区，以<strong>缩小爆炸半径</strong>并改善恢复能力；index 子系统的进一步分区本已列入年内计划，事故后<em>提前立即启动</em> <span class="srcref">[S1]</span>。它之所以只能算次优，是因为拆分是季度级工程，而 B 是本周就能做的——<strong>并且拆完之后你依然需要演练，才知道拆得对不对。</strong></p>
+    <p><b class="bad">D 是"看起来做了事"的典型。</b>没有被执行过的预案，其中的每一步都是假设：命令还在不在、依赖顺序对不对、耗时多少、谁有权限。关卡一的 GitLab 已经证明过——他们<em>有</em>五层备份，问题是从没验证过其中四层。<strong>文档不会在凌晨三点替你发现自己写错了。</strong>第 16 章会把这条铁律正式命名。</p>
+  </div>
+</div>
+
+<div class="decision" id="d3">
+  <span class="decision-tag">决策点 D3</span>
+  <h3>「秒抢」的状态页和监控大盘，现在都跑在主集群里。要不要挪？</h3>
+  <button class="opt" data-d="3" data-k="good"><span class="tag">A</span>挪出去：状态页与告警通道必须独立于它们要报告的系统</button>
+  <button class="opt" data-d="3" data-k="bad"><span class="tag">B</span>不用挪：主集群挂了本来就没人能访问状态页，挪了也没意义</button>
+  <button class="opt" data-d="3" data-k="mid"><span class="tag">C</span>不挪，但准备一个手动兜底通道（如官方社交账号）</button>
+  <button class="opt" data-d="3" data-k="bad"><span class="tag">D</span>把状态页做成静态页面放在同一台机器上，减少依赖</button>
+  <div class="verdict" id="v-d3">
+    <p><b class="good">A。</b>AWS 有两个小时说不出话，原因就是 SHD 管理控制台依赖 S3 <span class="srcref">[S1]</span>；事后他们把 SHD 管理控制台改成<strong>跨多个 AWS 区域</strong>运行 <span class="srcref">[S1]</span>。原则很简单：<em>报告故障的系统，不能和被报告的系统共享故障域</em>。这条同样适用于告警通道——如果你的告警要经过正在挂掉的那个消息队列，它就不是告警。</p>
+    <p><b class="bad">B 混淆了两件事：</b>"用户访问不了业务"和"用户不知道发生了什么"。事故期间用户会离开业务站点，转而去<em>专门找</em>状态页；这正是状态页流量的最高峰，也正是它最不该挂的时刻。关卡一里 GitLab 的公开监控站点同样没扛住事故期间涌来的用户（见<a href="level1.html">关卡一</a>的来源清单）——而沉默会被解读成"他们自己也不知道"。</p>
+    <p><b class="mid">C 是有用的兜底，而且 AWS 当时正是这么做的</b>——改用推特账号和横幅文字通报 <span class="srcref">[S1]</span>。但请注意它的定位：这是<strong>降级方案，不是设计</strong>。手动通道依赖于有人腾出手来发消息，而事故初期恰恰是所有人最忙的时候。把它作为唯一方案，等于把对外沟通的及时性押在人的余力上。</p>
+    <p><b class="bad">D 只解决了一半，而且是不重要的那一半。</b>静态化确实减少了状态页对应用和数据库的依赖，但它仍然和主集群共享机房、网络、电力和你的运维操作——而这次事故的起因正是一条<em>运维命令</em>。<strong>共享故障域的判据不是"依赖了哪些服务"，是"哪一次操作能同时打倒它们"。</strong></p>
+  </div>
+</div>
+
+<h3>恢复用了多久</h3>
+
+<div class="beat">
+  <div class="b"><span class="bt">9:37AM PST</span><p>命令执行，参数填错，超预期的服务器被移除 <span class="srcref">[S1]</span>。</p></div>
+  <div class="b"><span class="bt">11:37AM PST</span><p>在此之前一直无法更新状态页——SHD 管理控制台依赖 S3 <span class="srcref">[S1]</span>。<strong>沉默了两个小时。</strong></p></div>
+  <div class="b safe"><span class="bt">12:26PM PST</span><p>index 子系统激活了足够容量，<strong>开始</strong>服务 GET / LIST / DELETE 请求 <span class="srcref">[S1]</span>。</p></div>
+  <div class="b safe"><span class="bt">1:18PM PST</span><p>index 子系统<strong>完全恢复</strong>，GET / LIST / DELETE API 正常 <span class="srcref">[S1]</span>。</p></div>
+  <div class="b safe"><span class="bt">1:54PM PST</span><p>placement 子系统恢复完成（它要等 index 可用才能开始）。此时 S3 运行正常 <span class="srcref">[S1]</span>。</p></div>
+  <div class="b"><span class="bt">之后</span><p>部分受影响的其它服务在中断期间<strong>积压了工作</strong>，需要额外时间才完全恢复 <span class="srcref">[S1]</span>——积压的代价，第 9 章已经教过你怎么算。</p></div>
+</div>
+
+<div class="metrics">
+  <div class="metric"><div class="k">故障总时长</div><div class="v">约 4 小时 17 分</div><div class="d up">▲ 9:37 → 13:54 PST</div></div>
+  <div class="metric"><div class="k">状态页失声</div><div class="v">约 2 小时</div><div class="d up">▲ 依赖自举</div></div>
+  <div class="metric"><div class="k">触发动作</div><div class="v">1 个参数</div><div class="d warn">● 授权 · 按手册</div></div>
+  <div class="metric"><div class="k">恢复慢的原因</div><div class="v">多年未重启</div><div class="d warn">● 非数据损坏</div></div>
+</div>
+
+<!-- ================= 教训 ================= -->
+<h2><span class="sec">关卡 2 · 3 教训</span>三条</h2>
+
+<div class="lesson">
+  <div class="li"><span class="num">壹</span><div><strong>爆炸半径是设计出来的，不是祈祷出来的。</strong>这次事故里，"一条命令能移除多少容量"就是爆炸半径的定义式。AWS 的修复不是要求人更仔细，而是<em>让工具在人填错时也不至于致命</em>：移除更慢、并且不允许把任一子系统降到最小容量以下 <span class="srcref">[S1]</span>。<strong>凡是能一次性摧毁全局的操作入口，都应该在工具层被物理限幅。</strong></div></div>
+  <div class="li"><span class="num">貳</span><div><strong>很久没重启过的系统，重启时间是个未知数。</strong>S3 的架构本来就假设容量会失效，问题出在<em>大区域里这两个子系统多年没有被完整重启过</em>，而系统在这些年里长大了很多，安全校验跑得比预期久 <span class="srcref">[S1]</span>。<strong>你的恢复时长不等于你上次测的那个值，它等于你上次测之后系统长大的倍数。</strong>这条直通第 16 章：容量规划和恢复演练是同一件事的两面。</div></div>
+  <div class="li"><span class="num">叁</span><div><strong>应急系统不能建在被急救的对象上。</strong>状态页依赖 S3，于是 S3 挂的时候没人能说话 <span class="srcref">[S1]</span>。同样的陷阱有很多变体：告警走业务用的消息队列、值班手册存在挂掉的内网 wiki、登录跳板机依赖正在故障的认证服务。<strong>判据不是"它依赖了什么"，是"哪一次故障能同时带走它和它要报告的东西"。</strong></div></div>
+</div>
+
+<!-- ================= 带回秒抢 ================= -->
+<h2><span class="sec">关卡 2 · 4 带回「秒抢」</span>把三条教训变成本周的工单</h2>
+
+<p>此刻的「秒抢」：约 100 万用户、95 个人（第 7 章刚被重试风暴打过一次）。你已经有了限流、熔断、缓存和一堆定时任务——也就是说，<strong>你已经有了足够多的"一条命令能捅出大娄子"的地方</strong>。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>AWS 的失效点</th><th>「秒抢」的对应物</th><th>本周动作</th><th>关联</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>工具允许移除过多容量</b></td>
+        <td>缩容脚本、K8s 副本数调整、批量下线实例</td>
+        <td>给所有容量变更工具加<strong>最小保留量硬拒绝</strong>，并把单次变更幅度限死（如一次最多 20%）</td>
+        <td class="ch">本关 D1</td>
+      </tr>
+      <tr>
+        <td><b>核心子系统多年未重启</b></td>
+        <td>缓存集群、消息队列、网关配置中心</td>
+        <td>把「完整重启并计时」列入季度演练；<strong>记录的是耗时，不是成功与否</strong></td>
+        <td class="ch">第 16 章</td>
+      </tr>
+      <tr>
+        <td><b>串联依赖放大故障</b></td>
+        <td>下单 → 库存 → 支付的串联链路（第 7 章的级联故障 No.09）</td>
+        <td>画一张依赖图，标出「哪些组件挂了会让另一个组件<em>无法启动</em>」——注意区分"降级"和"起不来"</td>
+        <td class="ch">第 7 · 13 章</td>
+      </tr>
+      <tr>
+        <td><b>状态页依赖被报告的系统</b></td>
+        <td>监控大盘、告警通道、值班手册、状态页</td>
+        <td>逐个问一遍：「主机房整个断电时，它还在吗？」不在的挪出去</td>
+        <td class="ch">第 14 · 15 章</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>最后留一个可以马上做的小练习：<strong>打开你们的运维脚本目录，找出所有会删除、缩容、清空、重置的命令，数一数其中有几个在执行前会告诉你"这一下会影响多少"。</strong></p>
+
+<p>如果答案是零，那么你和 2017 年 2 月 28 日上午的距离，就是一个参数。</p>
+
+<div class="sources">
+  <h3>📄 原始来源（本页全部事实性陈述的出处）</h3>
+  <ol>
+    <li id="s1"><b>[S1]</b> AWS 官方复盘 <em>Summary of the Amazon S3 Service Disruption in the Northern Virginia (US-EAST-1) Region</em> ——
+      <a href="https://aws.amazon.com/message/41926/">https://aws.amazon.com/message/41926/</a></li>
+  </ol>
+  <p class="srcref">逐句核对清单见构建仓库 <code>sources/FACTS-level2.md</code>；来源原文留档见 <code>sources/raw/aws-s3-2017-summary.txt</code>。关于本次事故更大影响面的第三方统计未被采信为事实依据。</p>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch07.html">← 第 7 章 · 重试风暴与级联故障——好心办坏事</a></span>
+    <span><a href="appendix-cards.html">附录 · 病历卡图鉴</a></span>
+    <span><a href="ch08.html">第 8 章 · 分库分表——以及热点分片 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

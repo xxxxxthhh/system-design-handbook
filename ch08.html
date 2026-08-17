@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 章 · 分库分表——以及热点分片 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="level2.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch09.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 3 · 分布式深水区 · 第 8 章</div>
+    <h1>分库分表<br>以及热点分片</h1>
+    <p class="h1-sub">订单表过亿后，你把压力切成八份，以为容量终于线性增长。顶流场次开票时，其中一份却独自燃烧——均匀的哈希能搬数据，搬不走一个业务热点本身。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">08 · 1 值班现场</span>11:00，八个分片里只有一个在冒烟</h2>
+
+<p class="lead">创业第 2 年 8 个月，「秒抢」累计用户约 180 万。公司 130 人，后端 25 人。订单表突破一亿行后，慢查询连续霸榜；团队按 <code>show_id</code> 切成 8 个分片，常规查询终于恢复。两周后，顶流场次开票，11:00 整，大盘上七根柱子安静，一根直冲顶部。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 11:00:24</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] order-shard-03 CPU <span class="a">100%</span>，P99 6.4s<br>
+[<span class="a">WARNING</span>] &nbsp;cluster total <span class="t">80,000 QPS</span>，shard-03 承担 <span class="a">49,600</span><br>
+[<span class="g">INFO</span>] &nbsp;&nbsp;&nbsp;&nbsp;其余 7 个分片 CPU 18%–31%，无慢查询告警<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">热点维度：</span><br>
+<span class="t">show_id=8842 占当前请求 62%</span>
+  </div>
+</div>
+
+<p>总容量没有用完，坏的是分布。8 个分片平均每个约 10,000 QPS；show_id=8842 一项就带来 49,600 QPS，并被分片键稳定送到 shard-03。其余七台机器有余量，却无法替它处理这个 key。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">分片总数</div>
+    <div class="v">8</div>
+    <div class="d down">● 集群健康 7/8</div>
+  </div>
+  <div class="metric">
+    <div class="k">总负载</div>
+    <div class="v">80,000 QPS</div>
+    <div class="d warn">● 平均 10,000/片</div>
+  </div>
+  <div class="metric">
+    <div class="k">热点占比</div>
+    <div class="v">62%</div>
+    <div class="d up">▲ 单一 show_id</div>
+  </div>
+  <div class="metric">
+    <div class="k">最热 / 平均</div>
+    <div class="v">4.96×</div>
+    <div class="d up">▲ 超过热点判据 3</div>
+  </div>
+</div>
+
+<p>林工摇头：「别先加第九台。取模扩容会让大部分订单搬家，8842 搬到新家后还是一个 key。」你需要先把热点从通用分片隔离出来，再决定扩容拓扑；否则在线迁移会与开票流量争 I/O，却不改变 62% 请求汇聚到一处的事实。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 11:02。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立即把 8 片取模改成 9 片，在线重算并迁移订单
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    把八个分片的连接池统一调大五倍
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    将 show_id=8842 切到独立热点通道，入口限流并按子桶打散
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    给订单表补一个 show_id 联合索引，等待发布
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先把热点从共享分片摘出来。</b>
+      独立通道把 show_id=8842 的爆炸半径与普通订单隔离，入口配额保护其容量；若业务允许，再用用户或订单尾号分成子桶。七个健康分片不必陪热点一起迁移。
+    </p>
+    <p>
+      <b class="bad">A 的问题是迁移成本和问题不对症。</b>
+      取模从 8 变 9 会让约 8/9 的 key 改变目标，开票中搬动大部分订单会消耗网络与 I/O；热点 key 即使落到新节点，62% 的流量仍集中在一个分片。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      七个分片本来就有余量，扩大它们的池没有收益；shard-03 已 100% CPU，更大连接池只会放入更多并发争用，让排队从应用搬到数据库。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      索引能降低单次查询成本，值得复核；可眼前负载偏斜接近 5 倍，发布索引还要与在线写争资源。先隔离热点，再在安全窗口验证查询计划。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">08 · 2 原理</span>分片解决总容量，不保证业务均匀</h2>
+
+<p>分库分表把一张大表的行映射到多个物理分片。分片键决定每一行去哪，也决定每一种查询能否直接定位。若业务流量在 key 上极不均匀，哈希函数再均匀，也只能把这个热点完整地放到某一台机器。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+最热分片负载 = 总负载 × 该分片 key 占比<br>
+热点判据：最热分片 / 平均分片 &gt; 3
+  </div>
+</div>
+
+<p>代入现场：总负载 80,000 QPS，show_id=8842 占 62%，因此承载它的分片至少收到 <strong>80,000 × 62% = 49,600 QPS</strong>。8 个分片平均是 <strong>80,000 ÷ 8 = 10,000 QPS</strong>，最热/平均为 <strong>49,600 ÷ 10,000 = 4.96</strong>，超过 3，明确进入热点区。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">总负载</div>
+    <div class="v" style="color:var(--teal)">80,000</div>
+    <div class="d">QPS</div>
+  </div>
+  <div class="metric">
+    <div class="k">热点占比</div>
+    <div class="v" style="color:var(--amber)">62%</div>
+    <div class="d">单一 key</div>
+  </div>
+  <div class="metric">
+    <div class="k">最热负载</div>
+    <div class="v" style="color:var(--red)">49,600</div>
+    <div class="d">80,000 × 0.62</div>
+  </div>
+  <div class="metric">
+    <div class="k">热点比</div>
+    <div class="v" style="color:var(--red)">4.96×</div>
+    <div class="d">判据 &gt; 3</div>
+  </div>
+</div>
+
+<p>扩容还要付迁移账单。直接取模用 <code>hash(key) % N</code> 定位，N 改变时多数余数都会改变；一致性哈希只让新节点接管环上的一段 key 空间。对 N→N+1：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+取模迁移比例 ≈ N / ( N + 1 )　　|　　一致性哈希迁移比例 ≈ 1 / ( N + 1 )
+  </div>
+</div>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">取模 4→5</div>
+    <div class="v" style="color:var(--red)">约 80%</div>
+    <div class="d">4 ÷ 5</div>
+  </div>
+  <div class="metric">
+    <div class="k">一致性哈希 4→5</div>
+    <div class="v" style="color:var(--green)">约 20%</div>
+    <div class="d">1 ÷ 5</div>
+  </div>
+  <div class="metric">
+    <div class="k">迁移量差异</div>
+    <div class="v" style="color:var(--amber)">约 4 倍</div>
+    <div class="d">80% ÷ 20%</div>
+  </div>
+</div>
+
+<p><strong>4 台扩到 5 台，取模约迁移 80%，一致性哈希约迁移 20%。</strong>一致性哈希降低的是拓扑变化带来的搬家量，并不自动保证每台负载平整。物理节点在环上位置有限，区间可能大小不一；因此要给每台配置许多虚拟节点，把大区间切碎后再分散。</p>
+
+<p>分片键的账单比算法更长。按 user_id，用户订单历史是单分片查询，但一个热门场次会散到多个分片；按 show_id，场次售票统计和库存邻近，顶流场次却会压在单片。跨另一个维度的查询则要靠二级索引、映射表或 scatter-gather，读放大也随之出现。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>选择</th>
+        <th>局部性收益</th>
+        <th>热点风险</th>
+        <th>补救手段</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>user_id</strong></td>
+        <td>用户订单列表与售后查询单片完成</td>
+        <td>大客户或异常用户可能偏热，通常较易打散</td>
+        <td>热点用户独立桶、订单号路由映射</td>
+      </tr>
+      <tr>
+        <td><strong>show_id</strong></td>
+        <td>场次统计、同场订单处理集中</td>
+        <td>顶流场次天然形成业务热点</td>
+        <td>show_id + bucket、热点场次独立通道</td>
+      </tr>
+      <tr>
+        <td><strong>复合或映射</strong></td>
+        <td>可按主访问路径定制分布</td>
+        <td>路由、扩容与查询逻辑更复杂</td>
+        <td>目录服务、二级索引、异步聚合</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="kicker">分片键是未来查询与热点的契约。选它时不要只问“数据能不能均匀”，还要问“业务最热的那个 key 会把多少请求带到同一台机器”。</div>
+
+<p>热点分片是第 5 章缓存击穿的另一副面孔：许多并发围绕同一个 key 汇聚，只是这次被击穿的不是缓存回源，而是分片容量。第 12 章会为顶流场次设计独立通道，把它从普通订单漏斗里摘出来。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">08 · 3 病历卡</span>平均值很好看，单柱已经烧红</h2>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>热点分片</h3>
+    <span class="case-no">病历卡 No.10</span>
+  </div>
+  <div class="case-alias">Hot Shard · 业务热点被稳定映射到单个分片</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">分片键分布或访问频率不均，一个高频 key、租户或时间段集中落到同一分片。集群总容量仍有余量，但最热分片先耗尽 CPU、连接或 I/O，其他节点无法自动分担。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▁▁█▁▁</span>　单柱独高型。集群平均 CPU 与 P99 看似可控，单片指标却显著高于其余分片；最热/平均超过热点判据，错误集中在特定 key 或租户。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">按 show_id 分片遇到顶流场次；按时间分片导致最新分区承接全部写入；大租户独占一个 key；递增 ID 的错误范围切分；虚拟节点过少造成环区间不均。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>热点隔离</strong>：独立通道与资源池；② <strong>二次打散</strong>：在业务 key 后追加 bucket；③ <strong>虚拟节点</strong>：平滑一致性哈希区间；④ <strong>按分片观测</strong>：告警最热/平均，而不是只看集群平均。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」8 个订单分片总计 80,000 QPS，顶流 show_id=8842 占 62%，shard-03 独自承接 49,600 QPS；最热/平均达 4.96，其余七片仍有余量。</div>
+    </div>
+  </div>
+</div>
+
+<p>看到 <span class="sym">▁▁▁█▁▁</span>，先停止看集群平均。按分片、key、租户和访问模式下钻，算出最热/平均；若只是扩容而不改变热点 key 的映射方式，新机器很可能只接走冷数据。</p>
+
+</div><!-- /wrap -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">08 · 4 模拟器</span>扩容时，到底要搬多少 key</h2>
+<p style="max-width:760px">用固定的 10,000 个 key 对比取模与一致性哈希：先看扩容迁移量，再看虚拟节点如何修平负载，最后用单个热点 key 击穿两种方案。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">HASH RING SIMULATOR · 秒抢分片拓扑</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="哈希环、节点刻度、key 密度与每节点负载柱状图"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--teal)"></i>节点 / 虚拟节点</span>
+    <span><i style="background:var(--muted)"></i>key 密度</span>
+    <span>右侧虚线 = 平均负载</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">分片方式</div><div class="v" id="m-mode">—</div></div>
+    <div class="sim-metric"><div class="k">最近扩容迁移</div><div class="v" id="m-migration">—</div></div>
+    <div class="sim-metric"><div class="k">最大 / 平均负载</div><div class="v" id="m-imbalance">—</div></div>
+    <div class="sim-metric"><div class="k">热点注入</div><div class="v" id="m-hot">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn primary" id="btn-expand">➕ 扩容一台</button>
+    <label class="toggle"><input type="checkbox" id="tg-mode">一致性哈希（关闭 = 取模）</label>
+    <label class="toggle"><input type="checkbox" id="tg-hotspot">注入热点 key</label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>节点数 <span id="lb-nodes">4 台</span></label>
+      <input type="range" id="sl-nodes" min="3" max="8" step="1" value="4"></div>
+    <div class="slider"><label>虚拟节点数 <span id="lb-vnodes">150 / 节点</span></label>
+      <input type="range" id="sl-vnodes" min="1" max="200" step="1" value="150"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>扩容搬家。</strong>取模模式用 4 台点「扩容一台」，再重置、切一致性哈希后重做 → 取模迁移约 80%（75%–85%），一致性哈希约 20%（12%–30%）。<strong>两者迁移量级分别接近 N/(N+1) 与 1/(N+1)。</strong></li>
+    <li><strong>修平环。</strong>一致性哈希下把虚拟节点从 1 调到 150 → 最大负载/平均严格下降，150 时低于 1.30。<strong>一致性哈希天然不均匀，虚拟节点是必需品。</strong></li>
+    <li><strong>注入热点。</strong>把节点数设为 5，打开「注入热点 key」，分别观察取模与一致性哈希 → 两种模式的最热分片/平均都超过 2。<strong>分片解决容量，不解决热点；热点要靠第 5 章的击穿处方与打散。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->
+<div class="wrap">
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">08 · 5 权衡</span>按用户聚拢，还是按场次聚拢</h2>
+
+<p>分片键要服务主访问路径。user_id 让用户订单天然聚在一起，show_id 让场次订单天然聚在一起；复合分桶则用更多路由复杂度换热点打散。三个方案都能落地，但每个都会把另一类查询变贵。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>订单主表的分片键怎么选？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    user_id：一个用户的订单放在同一分片
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    show_id：同一场次订单放在同一分片
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    show_id + bucket：场次内再按用户或订单尾号打散
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · user_id</b>：用户订单历史、退款与售后通常单片完成，用户分布相对容易均匀。
+      <strong>账单：</strong>按场次统计、核销和批量处理要跨片聚合，需二级索引或异步数仓；大客户仍可能形成局部热点。适合以用户查询和售后为主的订单系统。
+    </p>
+    <p>
+      <b class="mid">B · show_id</b>：同场订单局部性好，场次统计与批处理简单，和场次级业务天然邻近。
+      <strong>账单：</strong>顶流场次把读写压到单片，用户订单列表要跨片查询；热门程度越偏斜，容量越难预测。适合场次均匀、场次级处理远多于用户查询的系统。
+    </p>
+    <p>
+      <b class="mid">C · show_id + bucket</b>：保留场次维度的可定位性，同时把一个顶流场次拆到多个子分片。
+      <strong>账单：</strong>同场统计要聚合多个 bucket，桶数扩缩、路由表和事务边界更复杂；冷场次也可能被过度拆分。适合热点场次占比高、可接受聚合成本的秒杀通道。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：普通订单主表采用 <strong>A</strong>，优先保障用户订单、退款和售后；顶流开票走 <strong>C</strong> 的独立热点通道，而不是让普通表都为极端场次付复杂度。理由是用户查询是长期主路径，热点场次则应被明确隔离；第 12 章会把这条独立通道放进完整秒杀架构。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">08 · 6 复盘</span>没有搬全城，先给热点单开一条路</h2>
+
+<p>回放 11:00 的正确剧本——先隔离正在燃烧的 key，再处理查询成本，扩容迁移留到流量稳定之后：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">11:02</span>
+    <p><strong>隔离热点。</strong>入口识别 show_id=8842，切到独立限流队列与临时热点库；shard-03 到达量从 49,600 降到 18,200 QPS，普通订单错误率开始回落。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">11:06</span>
+    <p><strong>场次内打散。</strong>新订单按 user_id 尾号拆成 8 个 bucket，并保持订单号到 bucket 的路由映射；热点通道最热/平均从 4.96 降到 1.42。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">11:13</span>
+    <p><strong>恢复普通分片。</strong>限制迁移与后台统计，给 shard-03 排空慢查询；其 CPU 从 100% 回到 58%，订单 P99 从 6.4s 降到 390ms。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">12:20</span>
+    <p><strong>计划性扩容。</strong>流量回落后评估一致性哈希与虚拟节点，用影子路由核对 4→5 的迁移范围；扩容不再与开票请求争同一条 I/O 通道。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>集群平均会掩盖单片死亡。</strong>容量告警要同时看最大值、分位数和最热/平均比；平均 CPU 低不代表每个分片都有余量。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>扩容不是热点处方。</strong>新节点能接走一部分普通 key，却不会拆开单个业务热点；先隔离或二次打散，再谈机器数量。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>分片键会向未来收税。</strong>它决定查询局部性、跨片聚合、扩容方式和热点形态；选择前要列出主路径与最坏流量分布。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">08 · 7 自测</span>你看的是平均，还是最热那一柱</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">六个分片的负载形状呈 <span class="sym">▁▁▁█▁▁</span>，集群平均正常，错误集中在一个业务 key。最可能是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>热点分片</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>缓存雪崩</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>消息积压</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>全站入口突发</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>单柱独高且绑定特定 key，是 No.10 的形状。D 很诱人，因为入口突发也会抬高负载，但均匀突发通常让多片一起上升；题中只有一片燃烧，证据指向分布偏斜。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 迁移算术</h3>
+  <p class="stem">从 4 台扩到 5 台，取模与一致性哈希的迁移比例量级分别约是多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>都约 20%</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>取模约 80%，一致性哈希约 20%</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>取模约 20%，一致性哈希约 80%</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>都约 80%</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b>取模约 <code>4/5=80%</code>，一致性哈希约 <code>1/5=20%</code>。A 是诱人的错误项，它把“新增一台占五分之一”直接套给取模，却忽略了模数改变会重排多数余数。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 热点算术</h3>
+  <p class="stem">总负载 90,000 QPS，某 key 占 40%。它所在分片至少承担多少 QPS？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>3,600 QPS</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>22,500 QPS</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">C</span>36,000 QPS</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>40,000 QPS</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">C。</b><code>90,000 × 0.4 = 36,000</code>。D 很诱人，因为把 40% 看成了 40,000，但百分比必须乘总量；B 则像是把总量平均分成四份，忽略题目给出的 key 占比。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 分片键账单</h3>
+  <p class="stem">订单按 user_id 分片后，哪类查询最可能需要额外的跨片聚合或二级索引？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>某用户查看自己的订单</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>统计某场次的全部订单</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>按订单号读取且已有路由映射</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>读取用户资料缓存</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>同一场次的用户分散在多个 user_id 分片上，场次统计需要跨片或额外索引。A 是最诱人的错误项，但它正是 user_id 分片的局部性收益：一个用户的订单可直接定位到单片。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「分库分表方案怎么设计？」</b>
+    <span class="ans">答题骨架：容量与查询画像 → 选择分片键 → 路由与全局 ID → 扩容迁移 → 跨片查询与事务 → 按分片观测和回滚。</span>
+  </div>
+  <div class="iq">
+    <b>「热点 key 怎么处理？」</b>
+    <span class="ans">答题骨架：算最热/平均 → 识别业务 key → 限流与隔离 → 二次 bucket 打散 → 缓存击穿保护 → 热点消退后的合并与回收。</span>
+  </div>
+  <div class="iq">
+    <b>「分片键选错了怎么补救？」</b>
+    <span class="ans">答题骨架：先加映射层或二级索引止痛 → 双写新旧路由 → 回填校验 → 灰度切读 → 停旧写并回收。反直觉加分点：先量迁移比例和热点分布，不把扩容当重分片。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="level2.html">← 实战关卡 2 · 云服务级联演练</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.10 已收录于附录图鉴</a></span>
+    <span><a href="ch09.html">第 9 章 · 消息队列——削峰填谷 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-5.js"></script>
+</body>
+</html>

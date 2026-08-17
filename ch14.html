@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 14 章 · 可观测性——看懂凌晨三点的仪表盘 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch13.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch15.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 4 · 高可用与多活 · 第 14 章</div>
+    <h1>可观测性<br>看懂凌晨三点的仪表盘</h1>
+    <p class="h1-sub">监控不是把图表铺满墙，而是让你从用户症状一路追到因果证据。凌晨三点，系统整体慢了 15%，没有发布、没有报错、没有一块面板变红——这才是观测能力的考试。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">14 · 1 值班现场</span>03:00，什么都没改，系统却慢了 15%</h2>
+
+<p class="lead">创业第 5 年 3 个月，「秒抢」累计用户约 4000 万，公司 280 人，研发 70 人。你刚接过本周 on-call，03:00 收到一条不够红、却让人无法继续睡的告警：全站核心旅程 P99 比过去七天同一时段慢了 15%。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · SEV-2 · 触发于 03:00:06</div>
+  <div class="pager-body">
+[<span class="a">WARNING</span>] checkout journey P99 <span class="a">1.38s</span>（7d 同时段基线 1.20s，+15%）<br>
+[<span class="g">INFO</span>] &nbsp;&nbsp;&nbsp;&nbsp;request rate 18,200/s，error rate 0.21%（均在基线）<br>
+[<span class="g">INFO</span>] &nbsp;&nbsp;&nbsp;&nbsp;最近 6 小时业务服务发布 <span class="t">0</span><br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">值班群第一条回复：</span><br>
+<span class="t">「CPU、内存、探活都绿，可能只是夜间流量抖动？」</span>
+  </div>
+</div>
+
+<p>你把用户症状与资源面板对齐。Rate 和 Errors 没变，Duration 的退化却跨订单、库存、支付三个服务同步出现；单看平均值，几乎看不出问题：</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">核心旅程 P50</div>
+    <div class="v">412ms</div>
+    <div class="d warn">● 基线 395ms，+4%</div>
+  </div>
+  <div class="metric">
+    <div class="k">核心旅程 P99</div>
+    <div class="v">1.38s</div>
+    <div class="d up">▲ 基线 1.20s，+15%</div>
+  </div>
+  <div class="metric">
+    <div class="k">服务 CPU</div>
+    <div class="v">37%</div>
+    <div class="d down">● 基线附近</div>
+  </div>
+  <div class="metric">
+    <div class="k">出站连接池排队</div>
+    <div class="v">P99 186ms</div>
+    <div class="d up">▲ 基线 12ms</div>
+  </div>
+</div>
+
+<p>没有业务发布，不等于运行环境没有变化。03:00 前后，三个服务的自身处理时间都稳定，慢掉的 180ms 集中出现在它们访问内部服务的出站等待上。探活请求不走这条高并发连接池，所以每个实例仍报告健康。</p>
+
+<p>阿凯查到平台层在 02:55 做过例行配置重载：服务网格代理重启后，出站连接池从显式 512 回落到默认 64。总流量不变，连接利用率却从 43% 推到 92%，少量请求开始排队；它没有制造错误，只把每段远程调用都拉长一点。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 03:04。你先做哪一步来确认方向？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    重启订单、库存、支付服务，清掉可能的进程抖动
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">B</span>
+    对比一批正常与慢请求的 trace，找出共同增加的 span，再下钻对应资源 USE 指标
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">C</span>
+    回滚最近一次业务发布，尽管最近 6 小时没有发布
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    把 P99 告警阈值从 1.3s 调到 1.5s，观察是否自行恢复
+  </button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B 是教科书答案：先比较慢在哪里，再解释为什么。</b>正常与慢 trace 的差分能把十几个服务缩成共同增长的出站等待 span；随后看连接池利用率、饱和度和错误，证据会指向共享代理而不是三个业务进程。</p>
+    <p><b class="bad">A 会破坏证据，还可能放大抖动。</b>三个服务同时重启会清空本地连接与缓存，制造新的冷启动峰；即使暂时恢复，也无法证明根因。CPU 与自身处理时间稳定，重启没有对应假设。</p>
+    <p><b class="bad">C 没有可回滚对象。</b>「线上慢了就回滚」是有效本能，但必须先确认时间线上存在变更。业务发布为零时强行回滚旧版本，只会引入另一个变量，平台配置仍原地不动。</p>
+    <p><b class="mid">D 让告警安静，却没有让用户变快。</b>阈值调整适合修正错误目标；本次 15% 退化已由七天基线与 trace 共同证明。先修连接池，再评估告警是否过敏。</p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">14 · 2 原理</span>从症状到位置，再到原因</h2>
+
+<p><strong>「metrics 告诉你坏了，traces 告诉你哪坏了，logs 告诉你为什么坏。」</strong>三者不是互相竞争的工具：指标适合低成本覆盖和趋势告警，链路适合还原一次请求穿过哪些边，日志适合解释某个组件在那个时刻做了什么决定。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+metrics：用户旅程 P99 +15%<br>
+traces：共同变慢的 span = outbound_pool_wait<br>
+logs：02:55 配置重载，pool_size 512 → 64
+  </div>
+</div>
+
+<p>把现场代入这条路径：指标先证明不是主观感受；抽取 200 条慢 trace 与 200 条同路由正常 trace，发现业务 span 中位差异不足 8ms，出站池等待却多出约 175ms；代理日志再给出配置回退时间和值。三个证据互相校验，形成可执行根因，而不是一句「网络可能有问题」。</p>
+
+<h3>RED 看服务，USE 看资源</h3>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>方法</th>
+        <th>维度</th>
+        <th>它回答什么</th>
+        <th>本次现场</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td rowspan="3"><strong>RED</strong><br>面向服务</td>
+        <td>Rate</td>
+        <td>请求量是否改变</td>
+        <td>18,200/s，基线附近</td>
+      </tr>
+      <tr>
+        <td>Errors</td>
+        <td>失败比例是否改变</td>
+        <td>0.21%，基线附近</td>
+      </tr>
+      <tr>
+        <td>Duration</td>
+        <td>延迟分布是否改变</td>
+        <td>P99 +15%，症状成立</td>
+      </tr>
+      <tr>
+        <td rowspan="3"><strong>USE</strong><br>面向资源</td>
+        <td>Utilization</td>
+        <td>资源忙碌比例多高</td>
+        <td>出站连接利用率 92%</td>
+      </tr>
+      <tr>
+        <td>Saturation</td>
+        <td>还有多少工作在排队</td>
+        <td>池等待 P99 186ms</td>
+      </tr>
+      <tr>
+        <td>Errors</td>
+        <td>资源层拒绝或失败多少</td>
+        <td>接近零，尚未变成失败</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>这正是为什么只看 CPU 容易漏诊。连接池是一种资源，它的利用率和饱和度可以在 CPU 37% 时先出问题。USE 中最早发声的往往是 Saturation：队列、等待线程、pending I/O；等错误率上升，用户已经替系统等了一段时间。</p>
+
+<div class="kicker">可观测性不是采集更多数据，而是让每个用户症状都能沿同一个业务标识，依次落到服务边、资源队列和组件决策上。</div>
+
+<h3>先建问题树，再开查询框</h3>
+
+<p>面对「线上变慢」，不要先在日志平台搜索 <code>error</code>。可以按一棵稳定的问题树推进：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>问题</th>
+        <th>证据</th>
+        <th>下一步分支</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>用户真的慢了吗</strong></td>
+        <td>端到端 P50/P95/P99、成功率、地区与版本切片</td>
+        <td>若只影响一类用户，先按维度缩小；若全局，再看服务 RED</td>
+      </tr>
+      <tr>
+        <td><strong>慢在哪一段</strong></td>
+        <td>正常与慢 trace 差分、关键 span 占比</td>
+        <td>自身处理慢看进程；远程等待慢看依赖与网络</td>
+      </tr>
+      <tr>
+        <td><strong>资源是否排队</strong></td>
+        <td>线程、连接、CPU、磁盘、队列的 USE</td>
+        <td>高利用无排队可观察；出现饱和要先降载或扩容</td>
+      </tr>
+      <tr>
+        <td><strong>为什么从这个时刻开始</strong></td>
+        <td>发布、配置、流量、依赖、证书与计划任务时间线</td>
+        <td>用日志和审计记录验证变更，不靠记忆猜</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>每走一步都要能排除一个分支。本次 Rate 与 Errors 稳定，排除流量洪峰和显性失败；trace 指向共同出站等待，排除三套业务逻辑同时退化；USE 显示连接池饱和，审计日志又与 02:55 配置重载对齐。证据链越短，止血动作越小。</p>
+
+<h3>高基数不是免费午餐</h3>
+
+<p>为了切片，你会想把 user_id、order_id、URL、错误文本都塞进指标标签。指标系统却需要为每种标签组合维护时间序列：100 个服务 × 20 个状态 × 4000 万用户，不是更多洞察，而是不可控的基数。稳定、有限的维度放 metrics；订单级标识放 traces 和 logs，通过 exemplar 或 trace id 连接。</p>
+
+<p>采样也要按问题设计。均匀采 1% 可能漏掉低频错误；更实用的是保留 100% 错误与超慢 trace，再对正常流量低比例采样。若某故障只占 0.05%，均匀采样 1% 每百万请求只留下约 5 条故障 trace，排障证据会非常稀薄。</p>
+
+<h3>症状告警与原因告警</h3>
+
+<p><strong>症状告警</strong>从用户承诺出发：成功率、延迟、正确性、积压年龄是否违反 SLO。它适合叫醒人，因为影响已经成立。<strong>原因告警</strong>监控 CPU、连接池、磁盘、证书到期等内部条件，适合自动化处置、工单或作为排障上下文；不是每次资源抖动都值得凌晨叫人。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>信号</th>
+        <th>告警类型</th>
+        <th>推荐路由</th>
+        <th>理由</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>支付成功率跌破 SLO</td>
+        <td>症状</td>
+        <td>立即 page</td>
+        <td>用户影响已发生，需要值班处置</td>
+      </tr>
+      <tr>
+        <td>订单 P99 持续超预算</td>
+        <td>症状</td>
+        <td>按 burn rate page</td>
+        <td>避免单个毛刺，也不等到月末耗尽预算</td>
+      </tr>
+      <tr>
+        <td>CPU 75% 持续 10 分钟</td>
+        <td>原因</td>
+        <td>自动扩容或工单</td>
+        <td>用户可能尚未受影响，先让系统自愈</td>
+      </tr>
+      <tr>
+        <td>证书 14 天后过期</td>
+        <td>原因</td>
+        <td>工单 + 逐级升级</td>
+        <td>有处理窗口，不应立即叫醒值班人</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h3>告警疲劳也能算</h3>
+
+<p>假设一个值班团队每天收到 120 条 page，其中只有 3 条需要人工立即动作，剩下 117 条是噪音。告警精度是 <code>3 ÷ 120 = 2.5%</code>；按每条确认与切换上下文 3 分钟算，每天消耗约 351 分钟，接近 6 小时。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">每日 page</div>
+    <div class="v">120</div>
+    <div class="d">其中噪音 117</div>
+  </div>
+  <div class="metric">
+    <div class="k">可行动比例</div>
+    <div class="v" style="color:var(--red)">2.5%</div>
+    <div class="d">3 ÷ 120</div>
+  </div>
+  <div class="metric">
+    <div class="k">每日噪音成本</div>
+    <div class="v" style="color:var(--amber)">约 351min</div>
+    <div class="d">117 × 3 分钟</div>
+  </div>
+  <div class="metric">
+    <div class="k">月度噪音</div>
+    <div class="v">3,510 条</div>
+    <div class="d">按 30 天计算</div>
+  </div>
+</div>
+
+<p>因此 <code>每天噪音告警 N 条 → 响应意愿衰减</code> 不是心理鸡汤。值班人被训练出「大概率无需动作」的先验后，真正告警也会先被怀疑。治理顺序是：删掉无 runbook 的 page；合并同一根因的风暴；把原因告警降为工单；用 SLO burn rate 同时看影响幅度与持续时间；每次事件复盘告警是否早、准、可行动。</p>
+
+<p>第 16 章的混沌实验会反过来验证这些观测：注入故障后，症状告警是否先于用户工单，trace 是否指向注入点，自动回滚是否在爆炸半径扩大前触发。没有被演练过的仪表盘，只能证明数据被采集，不能证明团队会使用。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">14 · 3 病历卡</span>形状是压缩过的故障叙事</h2>
+
+<p>本章不新增病历卡。可观测性的任务，是让前面章节的病在大盘上保留可辨认形状，并能从形状跳到具体请求与资源。</p>
+
+<div class="case-ref fwd">
+  <span class="no">病历卡 No.15</span><span class="nm">灰色故障</span><span class="sym">▇▇▇▇</span>
+  部分实例、分区或请求持续失败，探活与聚合平均值却保持正常；必须按维度切片并保留慢请求 trace。<a href="appendix-cards.html">附录病历卡图鉴 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.07</span><span class="nm">重试风暴</span><span class="sym">▁▂▄█████</span>
+  Rate 自持续爬升、下游 Errors 与 Duration 同步恶化；trace 会出现同一业务意图的重复 span。<a href="ch07.html">第 7 章定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.11</span><span class="nm">消息积压</span><span class="sym">▁▂▃▄▅▆▇</span>
+  backlog 与 oldest age 单调上涨，生产和消费都可能健康；要比较两条速率线，而不是只看组件存活。<a href="ch09.html">第 9 章定义 →</a>
+</div>
+
+<p>三种形状分别提醒你：平坦不代表健康、增长可能是反馈回路、增长也可能只是净速率为正。形状负责给第一假设，traces 和 logs 负责证伪；不要拿图形相似替代根因证据。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">14 · 5 权衡</span>告警宁敏感，还是宁安静</h2>
+
+<p>漏报会让用户先发现事故，噪音会让值班人逐渐不相信系统。阈值不是越低或越高越专业，它要匹配影响代价、自动恢复能力和人工动作。<strong>每一个都是对的，每一个都有账单。</strong></p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>核心下单旅程的告警策略怎么定？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    宁敏感：短窗口轻微越线就 page，优先降低漏报
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    宁安静：只在长窗口显著影响时 page，优先保护注意力
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    多窗口 burn rate：重大快速燃烧立即 page，轻微持续退化走工单
+  </button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · 宁敏感</b>：小范围故障更早被人看见，适合支付、库存等漏报代价高的链路。<strong>账单：</strong>短毛刺和自动恢复会频繁叫醒值班人，长期降低信任；必须配合去抖、合并和明确 runbook。适合低频高损、人工能快速止损的信号。</p>
+    <p><b class="mid">B · 宁安静</b>：page 数量低，值班人更愿意相信每次呼叫，调查质量也更高。<strong>账单：</strong>小范围灰色故障和缓慢退化可能等到用户工单才暴露。适合可自动恢复、影响低或有白天处理窗口的原因信号。</p>
+    <p><b class="mid">C · 多窗口 burn rate</b>：用错误预算消耗速度同时衡量幅度与持续时间，快故障和慢性病走不同通道。<strong>账单：</strong>需要可靠 SLO、基线和演练，规则比单阈值复杂；错误预算定义错了，精致算法也会路由错误。适合已有端到端 SLI 的核心旅程。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：核心下单采用 <strong>C</strong>，高 burn rate 立即 page，低 burn rate 建事件并在白天跟进；库存正确性与支付丢单另设低容忍症状告警。CPU、连接池等原因信号优先驱动自动扩容和排障上下文，不直接制造同等级 page。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">14 · 6 复盘</span>那 15% 后来怎么被定位到 64 个连接</h2>
+
+<p>回放 03:00 的正确剧本——每一步都缩小假设空间，没有用重启替代证据：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">03:04</span>
+    <p><strong>确认用户症状。</strong>按路由、地区和版本切片，确认 P99 +15% 跨三个核心服务存在，Rate 与 Errors 稳定；事件不是流量毛刺，也不是单客户端版本。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">03:09</span>
+    <p><strong>比较 trace。</strong>200 条慢请求相对正常请求共同多出约 175ms 的 <code>outbound_pool_wait</code>，业务处理 span 基本不变，调查从三个服务收敛到共享代理。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">03:14</span>
+    <p><strong>用 USE 解释。</strong>连接池利用率 92%、排队 P99 186ms、错误接近零；审计日志显示 02:55 重载后 pool_size 从 512 回到 64，时间与退化对齐。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">03:22</span>
+    <p><strong>小范围恢复并验证。</strong>先在一个单元恢复 512，P99 回到 1.19s；随后分批推广，端到端指标恢复基线。团队补上配置漂移检测和重载后的合成交易。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>从用户症状开始，不从机器猜起。</strong>端到端 SLI 先证明影响，再用 RED、trace、USE 和日志逐层缩小；绿 CPU 不能否定慢用户。</div>
+  </div>
+  <div class="li">
+    <span class="num">贰</span>
+    <div><strong>「没有发布」不是「没有变化」。</strong>配置重载、证书、流量、数据分布与依赖状态都在改变；时间线要覆盖代码之外的运行环境。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>每条 page 都要购买一个动作。</strong>叫醒人却没有影响定义、owner 和 runbook 的告警，会用噪音透支下一次真正事故的响应意愿。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">14 · 7 自测</span>你能把三支柱串成证据链吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">大盘显示 <span class="sym">▁▂▄█████</span>：请求 Rate 自持续上涨，下游 Duration 与 Errors 同步恶化，trace 中同一业务键出现多次调用。最可能是哪类故障？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>No.07 重试风暴</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>No.11 消息积压</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>No.03 双写不一致</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>普通业务增长</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">A。</b>自持续 Rate、错误恶化和同键重复调用共同指向重试反馈回路。B 也会爬升，但主要是 backlog 与 oldest age，生产请求不必被重复放大；D 无法解释同一业务键的重复 span 与下游错误同步上升。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 告警疲劳算术</h3>
+  <p class="stem">每天 120 条 page，只有 3 条需要立即人工动作。可行动比例是多少？若每条噪音耗 3 分钟，每天噪音成本约多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">A</span>2.5%，约 351 分钟</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>40%，约 9 分钟</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>97.5%，约 360 分钟</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>2.5%，约 120 分钟</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">A。</b><code>3 ÷ 120 = 2.5%</code>；噪音 117 条，<code>117 × 3 = 351</code> 分钟。C 把噪音比例当成可行动比例；D 又把每条告警只算 1 分钟。低精度会真实占用注意力，而不只是让列表难看。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · RED 与 USE</h3>
+  <p class="stem">请求量和错误率稳定，P99 上升；CPU 低，但连接池 pending 与等待时间很高。最准确的判断是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>CPU 低，所以没有资源问题</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>RED 的 Duration 已坏，USE 的 Saturation 指向连接池排队</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>只有 Errors 上升才算故障</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>先把日志级别调到最大再判断</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">B。</b>服务延迟退化已由 RED 证明，资源排队由 USE 的 Saturation 解释。A 把 CPU 当成资源总表，忽略连接这种独立资源；C 会等到排队演变成超时才承认影响；D 可能增加 I/O，却没有先建立假设。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 三支柱分工</h3>
+  <p class="stem">以下哪条排障链最符合本章方法？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>先全文搜索 error → 重启 → 看指标是否恢复</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>metrics 确认症状 → traces 定位慢段 → logs/审计解释该段为何变化</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>只保存 logs，因为信息最详细</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>只看 metrics，因为聚合后最便宜</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>三支柱沿症状、位置、原因逐级缩小。A 的搜索没有用户范围和时间假设；C 会淹没在细节里且缺少趋势，D 能看见退化却难定位跨服务边。它们不是替代品，而是可关联的证据层。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「线上整体变慢，怎么定位？」</b>
+    <span class="ans">答题骨架：端到端 SLI 确认影响 → 按用户/路由/版本切片 → RED 找服务 → 正常/慢 trace 差分 → USE 找饱和资源 → logs 与变更时间线验证 → 小范围恢复。</span>
+  </div>
+  <div class="iq">
+    <b>「怎么设计告警不被淹没？」</b>
+    <span class="ans">答题骨架：症状告警 page、原因告警自动化/工单 → SLO burn rate 多窗口 → 去重合并 → owner + runbook → 定期统计精度、响应时间和噪音成本。</span>
+  </div>
+  <div class="iq">
+    <b>「metrics、traces、logs 各解决什么问题？」</b>
+    <span class="ans">答题骨架：metrics 看覆盖与趋势 → traces 还原单次跨服务路径 → logs 解释局部决策 → 用 trace id/exemplar 关联。反直觉加分点：数据量最多的支柱不自动拥有最高诊断价值。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch13.html">← 第 13 章 · 微服务拆分——以及拆分的代价</a></span>
+    <span><a href="appendix-cards.html">本章回看 No.07 / 11，并预告附录 No.15</a></span>
+    <span><a href="ch15.html">第 15 章 · 异地多活——以及脑裂 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

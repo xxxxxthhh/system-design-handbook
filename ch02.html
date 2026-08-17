@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 章 · 第一次宕机——连接池耗尽之夜 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch01.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch03.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 1 · 单机时代 · 第 2 章</div>
+    <h1>第一次宕机<br>连接池耗尽之夜</h1>
+    <p class="h1-sub">本地媒体的一篇报道把三千用户同时推到门口。数据库没有坏，连接也没有丢；系统只是把每个位置都坐满，然后让后面的人排到超时。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">02 · 1 值班现场</span>23:10，第一篇报道带来第一场洪峰</h2>
+
+<p class="lead">创业第 2 个月，「秒抢」累计用户约 3 千。公司 6 人，后端只有 2 人。你刚合上电脑，本地媒体那篇《年轻人做的抢票网站》被推上首页；23:10，手机先震了一下，随后像卡住一样连续震动。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 23:10:18</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] api-gateway 502 比例 <span class="a">61.8%</span>（阈值 2%）<br>
+[<span class="r">CRITICAL</span>] app-db-pool active <span class="a">50/50</span>，waiters 1,842<br>
+[<span class="a">WARNING</span>] &nbsp;order-api P99 <span class="a">8.7s</span>（平时 140ms）<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">Nginx error log：</span><br>
+<span class="t">upstream timed out while waiting for application response</span>
+  </div>
+</div>
+
+<p>你连上监控。最扎眼的是「池满」，但另外三张卡片更重要：它们告诉你数据库还有余力，真正把用户挡在门外的是应用侧的等待。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">入口请求</div>
+    <div class="v">486 QPS</div>
+    <div class="d up">▲ 平时约 72 QPS</div>
+  </div>
+  <div class="metric">
+    <div class="k">连接池占用</div>
+    <div class="v">50 / 50</div>
+    <div class="d up">▲ 已持续打满 68s</div>
+  </div>
+  <div class="metric">
+    <div class="k">DB 查询 P99</div>
+    <div class="v">41ms</div>
+    <div class="d down">● 平时约 38ms</div>
+  </div>
+  <div class="metric">
+    <div class="k">DB CPU</div>
+    <div class="v">43%</div>
+    <div class="d down">● 尚有余量</div>
+  </div>
+</div>
+
+<p>连接池只有 50 个槽，入口却在一分多钟里涨到平时约 6.8 倍。拿到连接的请求仍能在几十毫秒内完成 SQL；拿不到连接的 1,842 个请求则在应用里排队。它们等满 8 秒，被网关切断，最终被翻译成 502。</p>
+
+<p>老陈在电话里问：「加连接，还是砍流量？」你看着 DB CPU 43% 和连接池等待队列，知道这不是“SQL 全慢了”。此刻要先决定的是：让多少请求进入有限的服务槽，而不是给等待队列换一个更深的坑。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 23:11。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    把连接池从 50 直接调到 500，先让排队请求都拿到连接
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    重启两台应用，清空 1,842 个等待请求
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    在入口把并发压到 40，连接等待超过 200ms 就快速失败
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    立即抓慢查询并给订单列表 SQL 加索引
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先让到达量低于服务能力。</b>
+      把入口并发压到连接池能稳定承受的范围，超出的请求在 200ms 内明确失败，连接槽便能开始周转。部分用户要重试，但存活请求不再和 1,842 个等待者争同一口气。
+    </p>
+    <p>
+      <b class="bad">A 的问题是没有先问下游账单。</b>
+      500 条并发连接可能把目前只有 43% CPU 的数据库瞬间推满；即便 DB 扛住，应用线程、内存和锁竞争也会把等待搬到下一层。池大小是并发上限，不是凭空出现的处理能力。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      重启只会让已等待的请求失败一次，入口 486 QPS 会立刻把空池重新灌满；两台应用同时重连，还可能在数据库上制造连接风暴。队列被清空，不等于到达率变小。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      慢查询值得查，可眼前 DB 查询 P99 只有 41ms，与平时接近。索引评估和发布按分钟到小时计，502 正按秒增加；先止血，再确认哪段服务时间值得优化。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">02 · 2 原理</span>利用率越靠近 1，等待越不像线性</h2>
+
+<p>一个连接槽在处理请求时，后来的请求只能等它归还。设到达速率为 λ，每个连接每秒能完成 μ 个请求，连接数为 c；容量直觉是 <code>c × μ</code>，利用率则是 <code>ρ = λ ÷ (c × μ)</code>。当 ρ 接近 1，任何一次稍慢的查询都会把队列推长。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+平均排队延迟 ∝ ρ / ( 1 − ρ )　　（ρ = 利用率）
+  </div>
+</div>
+
+<p>把平均服务时间记作 1 倍。代入指定的四个利用率，风险不是平滑增长，而是在容量边缘竖起一堵墙：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">ρ = 0.50</div>
+    <div class="v" style="color:var(--green)">1 倍</div>
+    <div class="d">0.5 ÷ 0.5</div>
+  </div>
+  <div class="metric">
+    <div class="k">ρ = 0.80</div>
+    <div class="v" style="color:var(--teal)">4 倍</div>
+    <div class="d">0.8 ÷ 0.2</div>
+  </div>
+  <div class="metric">
+    <div class="k">ρ = 0.95</div>
+    <div class="v" style="color:var(--amber)">19 倍</div>
+    <div class="d">0.95 ÷ 0.05</div>
+  </div>
+  <div class="metric">
+    <div class="k">ρ = 0.99</div>
+    <div class="v" style="color:var(--red)">99 倍</div>
+    <div class="d">0.99 ÷ 0.01</div>
+  </div>
+</div>
+
+<p>若一次请求平均占用连接 100ms，那么这组比例可读成约 100ms、400ms、1.9s、9.9s 的平均排队量级。从 80% 提到 95%，只多吃了 15 个百分点的容量，等待倍数却从 4 涨到 19，约 <strong>4.75 倍</strong>；从 95% 到 99% 又放大约 <strong>5.2 倍</strong>。</p>
+
+<p><strong>「利用率不是效率指标，是风险指标。」</strong>把连接池长期跑在 99% 看起来“物尽其用”，实际等于把 1% 的波动余量写进故障合同。流量有抖动，查询耗时有长尾，垃圾回收和锁等待也会偷走槽位；没有余量的池只需一个小毛刺，就会从忙碌跨到排队。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>你调的旋钮</th>
+        <th>短期收益</th>
+        <th>隐藏账单</th>
+        <th>正确观察</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>加大连接池</strong></td>
+        <td>允许更多请求同时进入 DB</td>
+        <td>下游 CPU、锁与 I/O 竞争上升；排队可能只是搬家</td>
+        <td>吞吐是否真增加，而不只看 active 连接数</td>
+      </tr>
+      <tr>
+        <td><strong>缩短超时</strong></td>
+        <td>更快释放线程和等待位</td>
+        <td>错误率上升，过短会误杀本可完成的请求</td>
+        <td>成功率、存活请求 P99、端到端预算</td>
+      </tr>
+      <tr>
+        <td><strong>降低到达量</strong></td>
+        <td>直接把 ρ 拉回安全区</td>
+        <td>需要决定先拒绝谁，并承受业务损失</td>
+        <td>通过量是否贴近已验证容量</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="kicker">连接池不是水库，是有固定座位的诊室。把走廊塞满病人不会让医生看得更快；真正的护栏是让到达量、服务时间与并发槽位保持可验证的余量。</div>
+
+<p>这一夜你先手工给 ρ 设了上限。到第 6 章，这个动作会被正式写成限流：系统主动决定放行量，而不是等连接池替你拒绝。到第 7 章，超时还会和重试绑在一起；超时越短并不天然越安全，因为上游若立即重试，失败流量会重新排队。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">02 · 3 病历卡</span>池满只是表象，排队才是伤口</h2>
+
+<div class="case-card">
+  <div class="case-head">
+    <h3>连接池耗尽</h3>
+    <span class="case-no">病历卡 No.01</span>
+  </div>
+  <div class="case-alias">Connection Pool Exhaustion · 有限槽位被占满，等待者持续堆积</div>
+  <div class="case-body">
+    <div class="case-row">
+      <div class="lbl">机理</div>
+      <div class="val">请求到达速度接近或超过连接归还速度，活跃连接占满池上限；新请求停在获取连接的等待队列里，等待又占住应用线程与内存，最终由超时把失败向上游传播。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">症状</div>
+      <div class="val"><span class="sym">▁▂▅███</span>　阶跃打满型。active 连接快速顶到上限后贴线不回，waiters 单调增加；应用 P99 和 502 飙升，但 DB 单条查询仍可能很快。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">易发场景</div>
+      <div class="val">突发流量；慢 SQL 或锁等待拉长连接持有时间；事务开启后夹杂远程调用；连接泄漏；应用实例扩容后总连接数超过数据库承载边界。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">处方</div>
+      <div class="val">① <strong>限并发与快速失败</strong>：把到达量压回可验证容量；② <strong>设置获取连接超时</strong>：不让等待队列无界增长；③ <strong>缩短持有时间</strong>：优化慢查询，事务内不做远程等待；④ <strong>按下游容量定总池大小</strong>：实例数增加时同步核算总连接。</div>
+    </div>
+    <div class="case-row">
+      <div class="lbl">案例</div>
+      <div class="val">「秒抢」第 2 个月被本地媒体报道，入口从约 72 QPS 涨到 486 QPS。50 个连接槽打满、等待者升到 1,842，全站 502 达 61.8%；入口限并发后，DB 无需重启便恢复周转。</div>
+    </div>
+  </div>
+</div>
+
+<p>看到 <span class="sym">▁▂▅███</span>，不要只问「池能不能再大」。先同时看三件事：连接持有多久、单位时间归还多少、下游还有多少余量。池满可能是流量变多，也可能是一笔慢事务把服务时间拉长；处方要落在 ρ 的分子或分母上。</p>
+
+</div><!-- /wrap -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">02 · 4 模拟器</span>ρ 不是效率，是悬崖边的距离</h2>
+<p style="max-width:760px">调节到达、服务耗时、连接池和超时，观察利用率接近 100% 时尾延迟如何失控，以及超时怎样用快速失败换回存活请求的延迟。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">QUEUEING SIMULATOR · 秒抢接口监控</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="P50、P99、利用率和超时错误率随时间变化"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--teal)"></i>P50</span>
+    <span><i style="background:var(--amber)"></i>P99</span>
+    <span><i style="background:var(--text)"></i>利用率 ρ</span>
+    <span><i style="background:var(--red)"></i>超时错误率</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">P50</div><div class="v" id="m-p50">—</div></div>
+    <div class="sim-metric"><div class="k">P99</div><div class="v" id="m-p99">—</div></div>
+    <div class="sim-metric"><div class="k">利用率 ρ</div><div class="v" id="m-rho">—</div></div>
+    <div class="sim-metric"><div class="k">超时错误率</div><div class="v" id="m-error">—</div></div>
+    <div class="sim-metric"><div class="k">处理吞吐</div><div class="v" id="m-throughput">—</div></div>
+  </div>
+  <div class="controls">
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>到达 QPS <span id="lb-qps">80 QPS</span></label>
+      <input type="range" id="sl-qps" min="1" max="1000" step="1" value="80"></div>
+    <div class="slider"><label>单请求服务耗时 <span id="lb-service">100 ms</span></label>
+      <input type="range" id="sl-service" min="20" max="2000" step="10" value="100"></div>
+    <div class="slider"><label>并发数 / 连接池 <span id="lb-concurrency">10 槽</span></label>
+      <input type="range" id="sl-concurrency" min="1" max="100" step="1" value="10"></div>
+    <div class="slider"><label>超时 <span id="lb-timeout">10000 ms</span></label>
+      <input type="range" id="sl-timeout" min="50" max="10000" step="50" value="10000"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>走近悬崖。</strong>保持 100ms、10 槽，把到达 QPS 依次调到 50、80、95，记录 P99 → ρ 按 50% / 80% / 95% 线性上涨，P99 单调上涨，且 95% 时超过 50% 时的 4 倍。<strong>ρ 是风险指标，不是效率勋章。</strong></li>
+    <li><strong>连接池幻觉。</strong>保持 95 QPS，把并发从 10 翻到 20 → 下游有效并行度没变，处理吞吐变化不到 10%，排队更深，P99 不降。<strong>槽位不是服务能力；无限加大连接池只会把等待藏进去。</strong></li>
+    <li><strong>用超时止损。</strong>保持 95 QPS，把超时从 3000ms 收到 300ms → 错误率上升，但存活请求 P99 下降超过 50%。<strong>系统从全员慢死变成部分快速失败。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->
+<div class="wrap">
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">02 · 5 权衡</span>超时不是耐心，是资源预算</h2>
+
+<p>事故后，你要为订单查询重新定超时。短超时能尽快释放槽位，长超时能给慢请求更多完成机会；端到端预算则把耐心按调用阶段拆开。三种方案都能成立，区别是你愿意把失败、等待和实现复杂度放在哪里。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>平时 P99 约 180ms、峰值偶尔到 700ms，订单查询超时怎么设？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    短超时：300ms，超过就快速失败
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    长超时：2s，尽量提高单次请求成功率
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    端到端 deadline：总预算 1s，按排队、DB、下游分段
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 短超时</b>：过载时迅速释放线程和连接等待位，故障边界清晰。
+      <strong>账单：</strong>会误杀一部分本可在 300–700ms 完成的请求，错误率更敏感；客户端若无退避地重试，短超时会变成更高到达率。适合可安全重试、失败页面明确、保护下游优先的查询。
+    </p>
+    <p>
+      <b class="mid">B · 长超时</b>：给长尾请求更多完成时间，低流量时单次成功率较高。
+      <strong>账单：</strong>过载时请求长时间占住线程和等待位，队列更深，用户最终仍可能等到失败。适合低并发、任务价值高、下游确实会在预算内恢复的操作。
+    </p>
+    <p>
+      <b class="mid">C · 端到端 deadline</b>：让每层知道还剩多少时间，避免上游已经放弃、下游仍继续做无用功。
+      <strong>账单：</strong>需要跨层传播 deadline、统一取消语义并补齐观测，工程复杂度最高。适合调用链超过一层、需要精确分配延迟预算的核心链路。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：当前单体先选 <strong>A</strong>，订单查询 300ms 快速失败，并禁止前端立即连点；同时把 <strong>C</strong> 写进下一版接口契约。理由是此刻最贵的不是少量慢请求失败，而是它们占住连接让整站排队；等调用链增长后，再用统一 deadline 避免每层各等一遍。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">02 · 6 复盘</span>那一夜，先让队列缩短</h2>
+
+<p>回放 23:10 的正确处置——每一步都在先减小 ρ，再验证服务能力，最后才恢复流量：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">23:11</span>
+    <p><strong>入口止血。</strong>并发上限设为 40，获取连接等待超过 200ms 快速失败。连接池仍忙，但 waiters 从 1,842 降到 620，存活请求 P99 从 8.7s 回到 1.6s。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">23:14</span>
+    <p><strong>缩短持有。</strong>临时关闭订单列表里的非必要统计查询，把单请求连接占用从约 100ms 压到 62ms；处理吞吐上升，等待队列降到 90。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">23:19</span>
+    <p><strong>核对下游。</strong>确认 DB CPU 峰值 57%、查询 P99 55ms，没有锁等待；于是把入口并发从 40 调到 45，而不是盲目把池扩成十倍。502 降到 3.1%。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">23:27</span>
+    <p><strong>逐级放量。</strong>每三分钟增加约 10% 放行量，观察连接池占用和 P99；流量回落后 502 低于 0.5%，池占用稳定在 60%–72%。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>排队要有边界。</strong>无界等待把一次过载变成内存、线程和用户耐心的联合透支；队列满时快速失败，是对资源的明确结算。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>连接数不等于吞吐。</strong>吞吐由下游服务能力决定。调大池之前先看 DB CPU、锁、I/O 和完成速率，否则只是把更多并发送进争用。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>给利用率留可测余量。</strong>稳态 70% 左右不是浪费，而是给长尾和突发预留刹车距离；阈值要靠压测与生产指标校准。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">02 · 7 自测</span>你离排队悬崖还有多远</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">连接池 active 曲线呈 <span class="sym">▁▂▅███</span>，顶到上限后贴线；waiters 持续增加，但 DB 查询 P99 仍接近平时。最可能是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">A</span>连接池耗尽</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>主从复制延迟</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>缓存击穿</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>静态资源过期</button>
+  </div>
+  <div class="verdict" id="v-q1">
+    <p>
+      <b class="good">A。</b>
+      「active 贴上限 + waiters 增长」是 No.01 的阶跃打满型。C 很诱人，因为击穿也会让 DB 压力骤升，但题中 DB 查询仍快，瓶颈发生在获取有限连接之前；复制延迟则更像与写高峰同步的旧读毛刺。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 排队算术</h3>
+  <p class="stem">按 <code>ρ / (1 − ρ)</code>，利用率从 0.8 升到 0.95，平均排队延迟的比例从多少变到多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>0.8 倍到 0.95 倍</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>4 倍到 19 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>8 倍到 9.5 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>20 倍到 95 倍</button>
+  </div>
+  <div class="verdict" id="v-q2">
+    <p>
+      <b class="good">B。</b>
+      <code>0.8/0.2=4</code>，<code>0.95/0.05=19</code>，只多 15 个百分点，等待约放大 4.75 倍。A 是最诱人的线性直觉，但分母 <code>1−ρ</code> 正在快速缩小，容量边缘不能按百分点直接外推。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 连接池幻觉</h3>
+  <p class="stem">连接池 50/50，DB CPU 92%、锁等待上升。此时把池调到 500 最可能发生什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">A</span>吞吐稳定提高十倍</button>
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">B</span>更多并发进入 DB，争用加重，等待被搬到下游</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>查询耗时自动降到十分之一</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>入口到达 QPS 自动下降</button>
+  </div>
+  <div class="verdict" id="v-q3">
+    <p>
+      <b class="good">B。</b>
+      DB 已接近饱和，放入更多并发通常只会增加锁、CPU 和 I/O 争用。A 很诱人，因为池大小确实扩大十倍，但槽位只代表许可，不代表服务能力；到达量和单次查询成本都没有因此变小。
+    </p>
+  </div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 超时边界</h3>
+  <p class="stem">把超时从 3s 缩到 300ms 后，错误率上升、存活请求 P99 大幅下降。最准确的解释是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">A</span>快速失败释放了等待资源，用部分失败换整体周转</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">B</span>数据库查询本身被超时优化了十倍</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>请求已经在客户端消失，不会再重试</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>短超时在任何场景都更安全</button>
+  </div>
+  <div class="verdict" id="v-q4">
+    <p>
+      <b class="good">A。</b>
+      超时没有加快 DB，只是让超预算请求尽早退出，释放线程与队列位置。B 把资源回收误当成服务时间优化；D 忽略了误杀和重试账单，若客户端立即重试，短超时反而可能提高到达率。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「为什么不能无限加大连接池？」</b>
+    <span class="ans">答题骨架：池是并发许可 → 下游容量才是吞吐上限 → 大池把等待搬到 DB → 实例数 × 单池大小核算总连接 → 用压测找安全水位。</span>
+  </div>
+  <div class="iq">
+    <b>「为什么 P99 比平均值重要？」</b>
+    <span class="ans">答题骨架：平均值会稀释长尾 → 排队由慢请求占槽传播 → 对比 P50/P99 与超时比例 → 用分位数定位少量请求如何拖住资源。</span>
+  </div>
+  <div class="iq">
+    <b>「超时应该怎么定？」</b>
+    <span class="ans">答题骨架：从端到端用户预算倒推 → 参考正常 P99 而非拍脑袋 → 给各层分配 deadline → 明确取消与重试 → 用错误率和资源释放验证。反直觉加分点：超时首先是资源预算。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch01.html">← 第 1 章 · 第一次卖票——一个单体的诞生</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.01 已收录于附录图鉴</a></span>
+    <span><a href="ch03.html">第 3 章 · 读写分离——以及复制延迟挖的坑 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-1.js"></script>
+</body>
+</html>

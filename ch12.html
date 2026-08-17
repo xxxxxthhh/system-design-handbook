@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 12 章 · 秒杀架构专章——瞬时百倍流量的完整作战方案 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch11.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="level3.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 3 · 分布式深水区 · 第 12 章</div>
+    <h1>秒杀架构专章<br>瞬时百倍流量的完整作战方案</h1>
+    <p class="h1-sub">前十一章教你逐个处理故障，这一章要求你把它们同时挡在库存之前。顶流开票进入 D-7，你第一次以技术负责人的身份签下完整作战方案。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">12 · 1 值班现场</span>D-7 10:00，老陈只问：库存层会看到多少</h2>
+
+<p class="lead">创业第 4 年，「秒抢」累计用户约 1000 万。公司 230 人，后端 42 人；你已经是技术负责人。七天后的 20:00，顶流场次开票。会议室里坐着网关、订单、库存、支付、DBA 与 SRE 的负责人，白板中央只有一个问题：1000 万入口请求同时到达，怎样让库存层只看见它能承受的那一小部分？</p>
+
+<div class="pager" aria-label="D-7 战备红灯">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>D-7 READINESS · RED · 评审于 10:00:00</div>
+  <div class="pager-body">
+[<span class="r">RISK</span>] 宣发预估首波入口 <span class="a">1000 万请求</span>，集中在开票后数秒<br>
+[<span class="r">RISK</span>] 库存层已压测稳定容量 <span class="a">约 1.2 万 QPS</span><br>
+[<span class="a">GAP</span>] &nbsp;&nbsp;当前入口可直达订单链路，客户端失败后会重试<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">老陈：</span><br>
+<span class="t">「别告诉我准备了多少机器。告诉我每一层挡掉多少，以及挡不住时怎么退。」</span>
+  </div>
+</div>
+
+<p>你把库存量、流量和恢复条件并排放上大盘。6 万张票意味着超过库存的购买意图终究不能成交；真正的目标不是让 1000 万请求都触碰库存，而是让被授权的一小股、可审计的请求进入交易核心。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">首波入口</div>
+    <div class="v">1000 万</div>
+    <div class="d up">▲ 数秒集中到达</div>
+  </div>
+  <div class="metric">
+    <div class="k">可售票</div>
+    <div class="v">6 万张</div>
+    <div class="d warn">● 稀缺资源</div>
+  </div>
+  <div class="metric">
+    <div class="k">库存稳定容量</div>
+    <div class="v">约 1.2 万 QPS</div>
+    <div class="d down">● 压测验证</div>
+  </div>
+  <div class="metric">
+    <div class="k">目标到库存层</div>
+    <div class="v">约 1 万 QPS</div>
+    <div class="d warn">● 留约 17% 余量</div>
+  </div>
+</div>
+
+<p>Mia 问能否“扩到每个人都排得上”。你摇头：入口与库存容量相差约三个数量级，扩容不可能替代准入。作战方案必须先是一只漏斗，再是一组隔离舱，最后才是数据库和缓存。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>D-7 10:08，你先拍板哪一件事？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    把库存服务扩到理论上能接 1000 万 QPS，再讨论其他层
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    客户端失败后立即重试三次，尽量让用户挤进交易链路
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    先冻结分层通过率与库存入口 1 万 QPS 预算，再逐层分配实现
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    先重写库存扣减代码，选择更快的存储方案
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先签容量契约，再谈组件。</b>
+      库存层目标 1 万 QPS 低于约 1.2 万的压测容量，漏斗每层都能拿到明确通过率、拒绝动作和负责人。这样 CDN、网关、排队与库存不是各自优化，而是在执行同一个端到端预算。
+    </p>
+    <p>
+      <b class="bad">A 的问题是目标本身不成立。</b>
+      1000 万首波请求不等于 1000 万有效交易；为无票请求扩库存层既昂贵，也会把锁、数据库和支付推入不可验证区。容量应服务业务漏斗，而不是追逐入口峰值。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      入口已经过载，立即重试会把一次购买意图变成多次尝试；第 7 章的重试乘法会在开票最脆弱的时刻重新上演。客户端应拿到明确排队凭证或退避结果。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但不能先做。</b>
+      库存扣减必须正确而高效，第 10 章已经讲过它的单一真相；但如果 1000 万请求仍能直达库存，再快的扣减也会被淹没。先定入口预算，再验证库存实现能稳定接住预算。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">12 · 2 原理</span>漏斗不是一层拒绝，是每层共同相乘</h2>
+
+<p>秒杀容量不是把入口峰值原样传到库存，而是让每层只把一部分请求交给下一层。静态化挡住无需进入源站的读，网关执行总量与公平性，排队层只释放库存能持续处理的节奏。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+① 逐层递推　x₀ = 入口请求数；　xᵢ = min( xᵢ₋₁ × 第 i 层通过率，第 i 层配额 )<br>　　本章第一道门：候选数 = min( 去重后的合格购票意图数，候选配额 )<br>② <b>实际入队</b>数 = 准入层按库存发出的凭证数（其余快速拒绝）<br>③ 到达库存层的<b>速率</b> = 排队层释放速率（由库存容量决定，不由通过率决定）
+  </div>
+</div>
+
+<p><strong>注意 ① 必须逐层写，不能把所有配额攒到最后一起取最小值</strong>——上游一旦被配额截断，下游的通过率就该乘在<em>截断之后</em>的输出上。把 min 放在末尾，等于假装上游没被截过，算出来的数会偏大。</p>
+
+<p>按作战方案逐步验算：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">入口</div>
+    <div class="v" style="color:var(--red)">1000 万</div>
+    <div class="d">购买页与静态读</div>
+  </div>
+  <div class="metric">
+    <div class="k">CDN 挡 90%</div>
+    <div class="v" style="color:var(--amber)">100 万</div>
+    <div class="d">通过率 10%</div>
+  </div>
+  <div class="metric">
+    <div class="k">网关候选配额</div>
+    <div class="v" style="color:var(--teal)">30 万</div>
+    <div class="d">候选意图（已去重）</div>
+  </div>
+  <div class="metric">
+    <div class="k">排队释放速率</div>
+    <div class="v" style="color:var(--green)">1 万 QPS</div>
+    <div class="d">按库存容量设定</div>
+  </div>
+  <div class="metric">
+    <div class="k">实际入队 8 万</div>
+    <div class="v" style="color:var(--green)">约 8 秒</div>
+    <div class="d">80,000 ÷ 10,000/s</div>
+  </div>
+</div>
+
+<p><strong>1000 万 → 100 万 → 30 万。</strong>CDN 挡住 90%，剩 100 万<em>次请求</em>；网关这一层的动作要按顺序说清楚，否则算式就不成立：<strong>先</strong>按账号与设备<strong>去重</strong>（同一账号的重复点击只留一个），<strong>再</strong>按预先拍板的<strong>候选配额</strong>截断到 <strong>30 万个合格购票意图</strong>。注意配额是<em>设定</em>出来的（定成库存的 5 倍），不是乘出来的；30% 只是事后回看的<em>有效放行率</em>（30 万 ÷ 100 万）。<strong>顺序不能反</strong>：去重不是保数量的操作，先取 30% 再去重，剩下的唯一意图通常不足 30 万。下文一律说「意图」，不说「人」——一个人可能发出多次请求，也可能被风控合并。而票只有 <strong>6 万张</strong>，供需比 <strong>5:1</strong>。</p>
+
+<p>这 30 万只是<strong>候选</strong>，不等于 30 万个都进队列。准入层还有第二道门：<strong>按库存发凭证</strong>——发约 <strong>8 万</strong>张（6 万库存的 1.3 倍，留出弃单余量），其余约 <strong>22 万</strong>当场收到「未获得本轮资格」。真正入队的 8 万，以 1 万 QPS 释放，约 <strong>8 秒</strong>排空。</p>
+
+<p>这里有一个容易被会议 PPT 抹掉的关键转折：<strong>前几层削减的是「请求数」，而库存层关心的是「速率」——百分比相乘不会把次数变成 QPS。</strong>入队的 8 万个意图究竟是 1 万 QPS 还是 5 千 QPS，取决于它们被摊在几秒里，而这恰恰是<em>排队层自己决定的</em>。所以排队层的参数不是「通过率」，而是<strong>释放速率</strong>：按库存约 1.2 万 QPS 的压测容量留出余量，定在 <strong>1 万 QPS</strong>（水位约 83%），8 万个入队意图约 8 秒放完。<em>（若不设第二道门、让 30 万全部入队，同样的释放速率要排 30 秒——那正是下面 D2 里 A 方案的代价。）</em></p>
+
+<div class="kicker">把「次」和「每秒」混着乘，是容量方案里最常见也最贵的一类错误：它会让一个看起来收敛的漏斗，在开票当天以你没算过的速率抵达数据库。<strong>漏斗的前几层管「有多少合格意图能继续」，最后一层管「它们以多快的速度进门」——后者才是数据库真正感受到的东西。</strong></div>
+
+<p>这里还藏着一个常见误读：事后说「网关有效放行率 30%」，分母是 <em>CDN 后的 100 万</em>，不是原始的 1000 万——对原始入口而言这个比例只有 3%。每层都必须记录自己的输入、输出、<strong>单位</strong>与<strong>分母</strong>，否则会议里的百分比无法拼成一条可执行链。<strong>更要紧的是别把观测值当控制值：网关真正的控制参数是「候选配额 30 万」，30% 是配额除以当时到达量算出来的结果；到达量一变，这个百分比就变，而配额不该跟着变。</strong></p>
+
+<div class="arch">
+  <div class="arch-title">「秒抢」顶流开票 · 端到端流量漏斗</div>
+  <div class="arch-flow">
+    <div class="arch-node">
+      <div class="nn">用户入口</div>
+      <div class="nd">1000 万请求<br>资格与静态读混合</div>
+    </div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node new">
+      <div class="nn">CDN / 静态化</div>
+      <div class="nd">挡 90%<br>剩 100 万</div>
+    </div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node new">
+      <div class="nn">网关 / 风控</div>
+      <div class="nd">去重 → 候选配额<br>截断至 30 万</div>
+    </div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node new">
+      <div class="nn">排队 / 凭证</div>
+      <div class="nd">候选 30 万 → 发凭证 8 万<br>按 1 万 QPS 释放，约 8 秒</div>
+    </div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node db">
+      <div class="nn">库存原子扣减</div>
+      <div class="nd">约 1 万 QPS<br>幂等 · 单一真相</div>
+    </div>
+    <div class="arch-arrow"><span>→</span></div>
+    <div class="arch-node">
+      <div class="nn">订单 / 支付</div>
+      <div class="nd">异步落库<br>对账与补偿</div>
+    </div>
+  </div>
+  <div class="arch-layer">
+    <div class="arch-node new"><div class="nn">缓存层</div><div class="nd">热点详情<br>互斥回源 · 预热</div></div>
+    <div class="arch-node new"><div class="nn">消息层</div><div class="nd">削峰填谷<br>积压水位 · 死信</div></div>
+    <div class="arch-node new"><div class="nn">隔离层</div><div class="nd">熔断 · 舱壁<br>重试预算</div></div>
+    <div class="arch-node new"><div class="nn">观测层</div><div class="nd">每层到达/通过/拒绝<br>库存与订单对账</div></div>
+  </div>
+  <div class="arch-note">每一层都要给出：输入量 · 通过率 · 拒绝语义 · 失败开关 · 自动回滚 · 负责人。漏斗只画箭头不写预算，等于没有作战方案。</div>
+</div>
+
+<p>全景图的重点不是组件数量，而是入口请求在每一箭头上都有明确去向：静态读不进源站，无资格请求不进排队，无凭证请求不进库存，扣减失败不进支付，订单落库失败进入补偿而不是让用户盲目重试。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>层</th>
+        <th>正常契约</th>
+        <th>红线</th>
+        <th>触发动作</th>
+        <th>恢复条件</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>CDN / 静态化</strong></td>
+        <td>挡住约 90% 详情与资源请求</td>
+        <td>回源率 &gt; 15%</td>
+        <td>延长安全静态内容、关闭个性化</td>
+        <td>回源率连续五分钟低于 10%</td>
+      </tr>
+      <tr>
+        <td><strong>网关 / 风控</strong></td>
+        <td>去重后按候选配额截断至 30 万（事后有效放行率约 30%）</td>
+        <td>候选意图超过 30 万，或发出凭证超过 8 万</td>
+        <td>收紧令牌、按用户与设备拒绝</td>
+        <td>下游 P99 与错误预算恢复</td>
+      </tr>
+      <tr>
+        <td><strong>排队 / 凭证</strong></td>
+        <td>向库存释放约 1 万 QPS</td>
+        <td>队龄或积压超过用户预算</td>
+        <td>停止发新凭证、快速告知售罄概率</td>
+        <td>消费速率持续高于生产速率</td>
+      </tr>
+      <tr>
+        <td><strong>库存</strong></td>
+        <td>原子扣减、幂等、拒绝负库存</td>
+        <td>容量水位 &gt; 0.85 或对账差异</td>
+        <td>收紧上游配额、暂停新扣减</td>
+        <td>水位回落且库存/订单对平</td>
+      </tr>
+      <tr>
+        <td><strong>订单 / 支付</strong></td>
+        <td>异步建单、支付有重试预算</td>
+        <td>积压单调增长或渠道熔断</td>
+        <td>降级非核心读、切渠道、停止盲重试</td>
+        <td>积压可在承诺时间内追平</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="kicker">秒杀架构不是让系统接住百倍流量，而是让百倍流量在抵达稀缺资源前，经过可解释、可观测、可回滚的层层选择。</div>
+
+<p>这只漏斗不是凭空出现：第 6 章提供网关限流与降级，第 8 章提供热点场次独立通道，第 9 章用消息队列削峰，第 10 章守住库存真相，第 11 章给重复请求加幂等护栏。第 16 章会把这些预案放进生产演练，检验箭头遇到真实故障时是否仍然成立。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">12 · 3 病历卡</span>十三张旧病历，变成十三道防线</h2>
+
+<p>本章不新增编号。作战方案要做的是把前半书的病历卡钉到具体层：哪一层负责挡、看什么形状、失败后开什么开关。下面 13 张卡覆盖从入口到订单落库的主要故障面。</p>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.01</span><span class="nm">连接池耗尽</span><span class="sym">▁▂▅███</span>
+  <strong>库存与订单层防线：</strong>按下游容量限制总连接与并发，获取连接超时快速失败；网关预算不允许把等待搬进连接池。<a href="ch02.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.02</span><span class="nm">主从复制延迟</span><span class="sym">▁▁▃▁▁█▁</span>
+  <strong>支付后查询防线：</strong>刚创建的订单走会话粘性或读主，页面显示确认中，不把副本暂时不可见说成丢单。<a href="ch03.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.03</span><span class="nm">缓存与 DB 双写不一致</span><span class="sym">▁▁▁▁▁</span>
+  <strong>场次配置层防线：</strong>DB 为权威源，价格与开售状态变更后幂等失效缓存，并对版本做抽样对账。<a href="ch04.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.04</span><span class="nm">缓存穿透</span><span class="sym">▁▂▂▃▃▄▄</span>
+  <strong>入口与缓存层防线：</strong>场次 ID、资格参数先校验，非法 key 被过滤；不存在的数据缓存短时空值。<a href="ch05.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.05</span><span class="nm">缓存击穿</span><span class="sym">▁▁▁█▁▁▁</span>
+  <strong>热点详情层防线：</strong>开票场次提前预热，逻辑过期配互斥回源，让一个 key 的失效只产生一次 DB 查询。<a href="ch05.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.06</span><span class="nm">缓存雪崩</span><span class="sym">███▁▁▁▁</span>
+  <strong>缓存集群防线：</strong>TTL 抖动、高可用与预热并用；缓存异常时收紧网关配额，先保护 DB 再慢放量。<a href="ch05.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.07</span><span class="nm">重试风暴</span><span class="sym">▁▂▄█████</span>
+  <strong>调用链防线：</strong>支付编排是重试责任层，其他层不叠加尝试；端到端预算配 backoff 与 jitter。<a href="ch07.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.08</span><span class="nm">惊群效应</span><span class="sym">▁▁█▁▁█▁</span>
+  <strong>排队与恢复防线：</strong>凭证过期、客户端退避和恢复放量都加随机抖动，避免整点集体醒来。<a href="ch07.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.09</span><span class="nm">级联故障</span><span class="sym">███▇▅▃▁</span>
+  <strong>服务隔离防线：</strong>库存、订单、支付各有舱壁和熔断；任一依赖变慢时，非核心功能降级，不借走交易资源。<a href="ch07.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.10</span><span class="nm">热点分片</span><span class="sym">▁▁▁█▁▁</span>
+  <strong>热点场次防线：</strong>顶流场次独立通道并在场次内二次打散，告警最热/平均而非集群平均。<a href="ch08.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.11</span><span class="nm">消息积压</span><span class="sym">▁▂▃▄▅▆▇</span>
+  <strong>订单消息层防线：</strong>同时监控积压量、增长速率和预计追平时间；追不平时停止发新凭证。<a href="ch09.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.12</span><span class="nm">消息丢失与重复</span><span class="sym">▁▁▁▁▁</span>
+  <strong>落库与对账防线：</strong>采用 at-least-once 配业务幂等，死信与库存/订单对账共同发现无症状差异。<a href="ch09.html">查看定义 →</a>
+</div>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.13</span><span class="nm">分布式锁失效</span><span class="sym">▁▁█▁▁</span>
+  <strong>库存互斥防线：</strong>优先使用原子扣减；确需锁时校验 owner、设置合理租期，并以数据库约束兜底。<a href="ch11.html">查看定义 →</a>
+</div>
+
+<p>病历卡不是复习清单，而是上线门禁。任一防线若没有指标、开关、负责人和恢复条件，就不能在 D-1 战备会上被标成绿色。</p>
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">12 · 5 权衡</span>让用户排队，还是尽快告诉他没抢到</h2>
+
+<p>超过库存处理能力的请求不能继续向下。长队列给用户“还有机会”的体验，快速随机拒绝保护系统并缩短等待，短队列加准入凭证则折中两者。三个方案都成立，但公平性、资源占用与产品承诺不同。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>30 万个合格购票意图到达排队准入层，票只有 6 万张。你让多少个进队列？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    全部进入有序队列，显示实时位置并等待
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    超量请求快速随机拒绝，立即返回未获得资格
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    短队列 + 限量准入凭证，队龄超预算后快速结束
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 全部排队</b>：先来后到容易解释，用户能看见位置，库存释放节奏也可控。
+      <strong>账单：</strong>超长队列占状态与连接，位置不等于可买到票；若预计等待超过开票窗口，继续排只是在延迟失败。适合供给会持续补充、等待时间可预测的场景。
+    </p>
+    <p>
+      <b class="mid">B · 快速随机拒绝</b>：系统成本低，用户迅速得到结果，超量流量不会形成积压。
+      <strong>账单：</strong>随机公平难向用户解释，网络与设备差异可能影响机会；拒绝后的客户端还要被禁止立即重试。适合库存极少、开票窗口短、系统存活优先的场景。
+    </p>
+    <p>
+      <b class="mid">C · 短队列 + 凭证</b>：只维护库存层能在用户预算内消化的队列，凭证让准入可审计，超龄请求及时退出。
+      <strong>账单：</strong>凭证签发、防伪、过期与多端同步增加复杂度；队列长度和超时必须随消费能力动态校准。适合高价值秒杀且需要兼顾公平、体验和容量的场景。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：采用 <strong>C</strong>。只给约 <strong>8 万</strong>个合格购票意图发短期凭证（约为 6 万库存的 1.3 倍，留出弃单余量），其余约 22 万当场返回「未获得本轮资格」，不进队列空耗；客户端按凭证轮询，不自行重试。理由是 6 万张票无法让全部 30 万个候选意图都进入长队，而可审计凭证比纯随机拒绝更容易处理公平与风控争议。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">12 · 6 复盘</span>七天后，库存层只看见它该看见的</h2>
+
+<p>回放从 D-7 到开票的正确顺序——先定契约，再压测，随后演练失败，最后才面对真实流量：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">D-7 10:30</span>
+    <p><strong>冻结漏斗预算。</strong>确认「1000 万次 → 100 万次 → 30 万个候选意图 → 发凭证 8 万」的逐层目标，以及排队层 <strong>1 万 QPS</strong> 的释放速率；每层登记 owner、红线和降级开关；释放速率低于压测容量。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">D-3 21:00</span>
+    <p><strong>全链路压测。</strong>使用隔离测试数据回放百倍入口，验证 CDN 回源 9.4%、网关 29.4%（据此产生候选意图约 27.6 万，按库存发出凭证 8 万）；排队层实测释放约 9,000 QPS，库存峰值约 9,000 QPS，订单对账无差异。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">D-1 15:00</span>
+    <p><strong>故障演练。</strong>依次注入缓存 miss、支付超时和一个订单消费者下线；限流、熔断、积压告警与自动回滚均触发，发现并修复一处客户端立即重试。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">T0 20:00</span>
+    <p><strong>按契约开票。</strong>入口峰值接近预估，库存层峰值约 9,700 QPS；核心 P99 420ms，库存与订单最终对平。售罄后停止发凭证，队列没有拖成亡灵流量。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>先预算，后选型。</strong>没有逐层输入输出，CDN、网关、MQ 和数据库只是组件清单；容量契约把它们变成一条漏斗。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>失败路径也要压测。</strong>正常路径能接 1 万 QPS，不代表缓存雪崩、消费者下线或支付熔断时仍能接住；预案要在故障状态下验收。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>公平是可审计的工程属性。</strong>凭证签发、排队位置、设备风控和拒绝原因都要留下证据，不能只靠“随机看起来公平”。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">12 · 7 自测</span>你能把百倍流量压成一条可控细流吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">订单消息积压曲线呈 <span class="sym">▁▂▃▄▅▆▇</span>，生产速率持续高于消费速率。漏斗哪一层应立即收紧？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>CDN 增加静态图片缓存时间即可</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">B</span>停止或减少新凭证发放，让消息层先追平</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>客户端提高重试次数</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>扩大订单查询连接池</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">B。</b>单调爬升不回落是 No.11 消息积压，生产持续大于消费时要从上游减量。D 很诱人，因为积压发生在订单域，但扩大查询池不改变消息消费差额，还可能抢走消费者的数据库资源。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 漏斗算术（注意分母与单位）</h3>
+  <p class="stem">首波 1000 万<em>次请求</em>，CDN 后通过 10%。网关去重后按<strong>候选配额</strong>截断至 <strong>30 万</strong>个合格意图；准入层按库存发 <strong>8 万</strong>张凭证；排队层以 1 万 QPS 向库存释放。问：网关的<strong>有效放行率</strong>与<strong>实际排空时间</strong>？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>3%，约 8 秒</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">B</span>30%，约 8 秒</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>30%，约 30 秒</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>8%，约 8 秒</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">B。</b>有效放行率的分母是<em>网关的到达量</em>，也就是 CDN 后的 100 万：<code>300,000 ÷ 1,000,000 = 30%</code>。排空时间只看真正入队的 8 万张凭证：<code>80,000 ÷ 10,000/s = 8 秒</code>。<b class="bad">A 是最诱人的错误项</b>——它把分母取成了原始入口 1000 万（<code>30 万 ÷ 1000 万 = 3%</code>）；<strong>百分比脱离分母就没有意义</strong>。C 默认「候选数 = 入队数」，漏掉了准入层这道门，30 秒是<em>假如不设门</em>才会发生的事。D 把入队数当成了放行数（<code>8 万 ÷ 100 万</code>）。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 漏斗边界</h3>
+  <p class="stem">库存稳定容量约 1.2 万 QPS，排队层当前释放 1.5 万 QPS。最正确的处理是什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">A</span>收紧排队释放速率到验证容量以内，并观察水位</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>保持 1.5 万，因为平均值可能扛住</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>让客户端自行决定是否继续进入</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>绕过库存直接创建支付单</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">A。</b>释放速率必须服从已验证的持续容量，还要给长尾与故障留余量。B 很诱人，因为 1.5 万只高出 25%，但容量边缘的排队会非线性恶化，平均能扛不等于峰值可持续。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 病历卡设防</h3>
+  <p class="stem">顶流场次让一个订单分片独占大部分流量，其他分片仍空闲。漏斗里最对症的组合是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>只增加全站 CDN TTL</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>热点场次独立通道 + 场次内二次打散 + 单独配额</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>让八个分片一起扩大连接池</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>关闭库存幂等检查</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>这是 No.10 热点分片，隔离、打散与配额分别控制爆炸半径、分布和总量。C 是最诱人的错误项，但冷分片扩池帮不了热 key，热分片扩池还可能加重数据库争用。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「请用 45 分钟设计一个秒杀系统。」</b>
+    <span class="ans">答题骨架：需求与库存约束 → 峰值估算 → 静态化/网关/排队漏斗 → 库存原子扣减 → 订单支付异步化 → 幂等对账 → 降级与容量验证。</span>
+  </div>
+  <div class="iq">
+    <b>「怎么防黄牛？」</b>
+    <span class="ans">答题骨架：账号/设备/行为风险信号 → 资格预校验 → 限频与凭证 → 排队公平 → 支付与收货约束 → 申诉和误伤指标。</span>
+  </div>
+  <div class="iq">
+    <b>「全链路压测怎么做？」</b>
+    <span class="ans">答题骨架：隔离测试数据 → 按漏斗逐层给量 → 同时验证正常与故障路径 → 观察到达/通过/拒绝/积压 → 自动回滚 → 对账收尾。反直觉加分点：压测要证明拒绝路径也能工作。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch11.html">← 第 11 章 · 幂等与分布式锁——用户狂点了八次购买</a></span>
+    <span><a href="appendix-cards.html">本章按病历卡 No.01–13 逐层设防</a></span>
+    <span><a href="level3.html">实战关卡 3 · 发布事故决策演练 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实战关卡三 · Knight Capital 2012：四十五分钟 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar"><span><b>系统是被打出来的</b> · 系统设计实战手册</span><nav aria-label="章节导航"><a href="ch12.html">← 上一章</a><a href="index.html">目录</a><a href="ch13.html">下一章 →</a></nav></div>
+  <div class="chapter-head">
+    <div class="eyebrow">🔥 实战关卡三 · 真实事故 · PART 3 收官</div>
+    <h1>Knight Capital 2012<br>四十五分钟</h1>
+    <p class="h1-sub">八台服务器，七台装了新代码。第八台上，一段 2003 年就停用、2005 年被改坏、此后再没人测过的代码，正在等一个开关。开市铃响，开关合上了。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="disclaimer">
+  <b>关于本页的事实边界：</b>本页根据美国证券交易委员会（SEC）公开行政令改编，细节经过叙事化处理。
+  技术事实、时间线与决策链均取自页末所列官方原始文档，事实性陈述后以
+  <span class="srcref">[S1 §N]</span> 标注条款号；氛围与心理描写为叙事化补充，<b>不代表当事人的真实言行</b>。
+  本页<b>不出现真实人物姓名，不虚构任何人物台词，不指名批评任何个人</b>——SEC 文件本身也未点名个人。<br>
+  <b>法律语境：</b>Knight 提交了和解要约，在<b>既不承认也不否认</b>该文件所述认定的前提下同意该行政令
+  <span class="srcref">[S1 §II]</span>。本页据此行文。
+</div>
+
+<!-- ================= 现场 ================= -->
+<h2><span class="sec">关卡 3 · 1 现场</span>一段等了九年的代码</h2>
+
+<p class="lead">先看结果，因为结果决定了你读下面每一段时的心跳。</p>
+
+<div class="metrics">
+  <div class="metric"><div class="k">持续时间</div><div class="v">约 45 分钟</div><div class="d up">▲ 2012-08-01</div></div>
+  <div class="metric"><div class="k">触发订单</div><div class="v">212 笔</div><div class="d">客户的小额零售单</div></div>
+  <div class="metric"><div class="k">实际成交</div><div class="v">约 400 万笔</div><div class="d up">▲ 154 只股票</div></div>
+  <div class="metric"><div class="k">成交股数</div><div class="v">约 3.97 亿</div><div class="d up">▲ 股</div></div>
+  <div class="metric"><div class="k">净头寸</div><div class="v">多 35 / 空 31.5</div><div class="d up">▲ 亿美元（80 只 / 74 只）</div></div>
+  <div class="metric"><div class="k">最终损失</div><div class="v" style="color:var(--red)">超 4.6 亿</div><div class="d up">▲ 美元</div></div>
+</div>
+
+<p>出问题的系统叫 <strong>SMARS</strong>——Knight 的自动化股票订单路由器 <span class="srcref">[S1 §1]</span>。它的工作是接收上游传来的「母单」，再按市场流动性拆成若干「子单」发到各交易场所去成交 <span class="srcref">[S1 §12]</span>。</p>
+
+<p>作为参照：2011 到 2012 年间，Knight 的总交易量大约占全美上市股票交易的 <strong>10%</strong>，仅 SMARS 一家就占 <strong>1% 以上</strong> <span class="srcref">[S1 §11]</span>。这不是一个边缘系统。</p>
+
+<h3>Power Peg：一具留在生产环境里的亡灵</h3>
+
+<p>2012 年 7 月，Knight 为了配合纽交所一个新项目（零售流动性计划，RLP，原定 8 月 1 日启动）改造系统，其中包括在 SMARS 里部署新代码 <span class="srcref">[S1 §12]</span>。</p>
+
+<p>新代码要替换掉订单路由器里一段<strong>没在用的旧代码</strong>——一个叫 <strong>Power Peg</strong> 的功能 <span class="srcref">[S1 §13]</span>。它的履历是这样的：</p>
+
+<div class="beat">
+  <div class="b"><span class="bt">2003 年</span><p>Knight <strong>停用</strong> Power Peg 功能 <span class="srcref">[S1 §14]</span>。但代码<strong>没有删</strong>——它仍然留在服务器上，<strong>并且仍然可以被调用</strong> <span class="srcref">[S1 §13]</span>。</p></div>
+  <div class="b"><span class="bt">2005 年</span><p>Knight 把 Power Peg 里那个<strong>累计数量函数</strong>挪到了 SMARS 代码序列中更靠前的位置 <span class="srcref">[S1 §14]</span>。<br>这个函数原本的职责是：统计母单已成交多少股，<strong>在母单成交完毕后让代码停止继续拆发子单</strong> <span class="srcref">[S1 §14]</span>。<br><strong>它就是刹车。而刹车被搬走了。</strong></p></div>
+  <div class="b"><span class="bt">2005 年之后</span><p>搬完之后，Knight <strong>再没有测试过</strong> Power Peg 代码，因此不知道它若被调用还能否正确工作 <span class="srcref">[S1 §14]</span>。</p></div>
+  <div class="b"><span class="bt">2012 年 7 月</span><p>新的 RLP 代码<strong>复用了那个原本用来激活 Power Peg 的开关（flag）</strong>。计划是把 Power Peg 代码删掉，这样开关置 "yes" 时激活的就是新功能 <span class="srcref">[S1 §13]</span>。<br><em>计划的前半句执行了，后半句没有。</em></p></div>
+</div>
+
+<div class="kicker">把这四行连起来读：一段<strong>九年没运行</strong>、<strong>七年前被改坏</strong>、<strong>从未重测</strong>的代码，仍然躺在生产服务器上可被调用——而现在，有人把它的电源开关接到了一个每天都会被拨动的新功能上。<br><br>「复用旧 feature flag = 唤醒亡灵」不是比喻，这是 SEC 文件里的事实链。</div>
+
+<h3>七台和一台</h3>
+
+<p>从 <strong>2012 年 7 月 27 日</strong>起，新代码分批部署，连续几天陆续放到 SMARS 的服务器上 <span class="srcref">[S1 §15]</span>。</p>
+
+<p>部署过程中，一名技术人员<strong>漏了 8 台服务器中的 1 台</strong> <span class="srcref">[S1 §15]</span>。</p>
+
+<p>接下来是三句话，每一句都是一道本该存在的防线：</p>
+
+<div class="pager" aria-label="缺失的防线">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>SEC ORDER · §15 · 部署环节的三重缺失</div>
+  <div class="pager-body">
+[<span class="r">MISSING</span>] 没有安排<span class="a">第二名技术人员复核</span>这次部署<br>
+[<span class="r">MISSING</span>] <span class="a">没有任何人</span>发现第八台上 Power Peg 未删、新代码未加<br>
+[<span class="r">MISSING</span>] Knight <span class="a">没有书面规程</span>要求做这种复核<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">另见 §26：Knight 对 SMARS 没有书面的代码开发与部署规程</span><br>
+<span class="g">（公司其它组是有的），也没有规定"动了生产上的未使用代码后必须测试它"。</span>
+  </div>
+</div>
+
+<h3>8:01 AM：系统喊了 97 次</h3>
+
+<p>8 月 1 日早晨，开市前。SMARS 处理了一些盘前订单，Knight 内部一个系统开始自动生成邮件——称作 <strong>BNET rejects</strong>——内容引用 SMARS，并标明一个错误：<strong>"Power Peg disabled"</strong> <span class="srcref">[S1 §19]</span>。</p>
+
+<p>从约 <strong>8:01 a.m. ET</strong> 起，到 <strong>9:30 a.m.</strong> 开市之前，系统一共发出了 <strong>97 封</strong>这样的邮件给一组 Knight 人员 <span class="srcref">[S1 §19]</span>。</p>
+
+<p>但是：Knight <strong>并没有把这类邮件设计成系统告警</strong>，相关人员<strong>一般也不看</strong>它们 <span class="srcref">[S1 §19]</span>。</p>
+
+<p>SEC 在文件里写下了这一段里最重的一句话——它是实时发出的、正是由部署失误引起的、<strong>本可提供在开市前发现并修复问题的机会</strong>；然而这些通知<strong>在开市前无人处理，开市后也没有被用来诊断问题</strong> <span class="srcref">[S1 §19]</span>。</p>
+
+<div class="kicker">97 封邮件，89 分钟，一个精确指出病因的错误串。<strong>系统知道自己坏了，它说了 97 次，没有人在听。</strong><br><br>第 14 章讲告警疲劳时用的是「狼来了」的比喻。这里是那个比喻的真实标价：<strong>一条没有被设计成告警的告警，等于没有告警。</strong></div>
+
+<h3>9:30:00</h3>
+
+<p>开市。带着那个被复用开关的订单一到第八台服务器，就触发了残留的 Power Peg 代码 <span class="srcref">[S1 §16]</span>。七台装了新代码的服务器处理正确 <span class="srcref">[S1 §16]</span>。</p>
+
+<p>因为累计数量函数——那个刹车——早在 2005 年就被搬走了，这台服务器对每一笔进来的母单，<strong>不管已经成交了多少股，都持续快速地发出子单</strong> <span class="srcref">[S1 §16]</span>。</p>
+
+<p>系统的另一部分<em>其实已经知道</em>母单成交完毕了。但<strong>这个信息没有传给 SMARS</strong> <span class="srcref">[S1 §16]</span>。</p>
+
+<p>212 笔母单，变成了数百万笔子单 <span class="srcref">[S1 §17]</span>。</p>
+
+<!-- ================= 决策点 ================= -->
+<h2><span class="sec">关卡 3 · 2 决策点</span>四十五分钟里的每一个岔路口</h2>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1 · 开市前 89 分钟</span>
+  <h3>8:15 AM。你是收到那组邮件的人之一。收件箱里已经堆了三十几封 "Power Peg disabled"。</h3>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>先放着——盘前邮件一向很多，等开市后没问题就说明是误报</button>
+  <button class="opt" data-d="1" data-k="good"><span class="tag">B</span>立刻查这个错误串指向哪个系统，并在开市前确认八台服务器的代码版本一致</button>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">C</span>把邮件规则改一改，先别让它刷屏，等收盘后再处理</button>
+  <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>转发给部署那位同事问一句，然后继续做别的</button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">B。</b>这封邮件里有两个极其罕见的信号叠在一起：<strong>它指名了一个本该不存在的功能</strong>（Power Peg 早在 2003 年就停用了 <span class="srcref">[S1 §14]</span>），并且<strong>它在部署刚结束的窗口里出现</strong>。任何一条单独出现都可能是噪音，两条同时出现指向的只有一个方向——<em>某台机器上的代码和你以为的不一样</em>。而验证"八台版本是否一致"是一条只需要几分钟、且能在开市前完成的确定性检查。</p>
+    <p><b class="bad">A 是当天实际发生的事的近似</b>，而且它的推理在绝大多数日子里都是对的：盘前噪音确实多。它错在把<em>"我通常可以忽略这类邮件"</em> 当成了 <em>"这封邮件可以被忽略"</em>。区别在于内容——「Power Peg disabled」不是一个通用错误，它是一个<strong>指名道姓的、不该存在的东西</strong>。</p>
+    <p><b class="bad">C 是所有选项里最糟的，因为它把唯一的信号源关掉了。</b>SEC 特别指出这些消息「是实时发出的、正是由部署失误引起的」<span class="srcref">[S1 §19]</span>。降噪的正确做法是<em>先搞清楚它在说什么</em>再决定要不要静音；反过来做，你就永久失去了这次机会。第 14 章会展开：告警治理的第一步是分类，不是过滤。</p>
+    <p><b class="mid">D 比 A 强，但它把一个 <em>deadline 明确</em> 的问题变成了一个<em>没有 deadline</em> 的问题。</b>开市时间是 9:30，这是一个硬边界；"转发问一句"没有绑定这个边界，同事可能在忙、可能在路上。<strong>当一个问题有硬 deadline 时，正确的动作是给它配一个在 deadline 之前必须完成的确定性检查</strong>，而不是发起一次异步对话。</p>
+  </div>
+</div>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2 · 开市后约 10 分钟 · 真实团队面对的那个岔路</span>
+  <h3>9:40 AM。有人在持仓监控上看到一个账户的头寸正在异常膨胀，来源不明。系统仍在发单。</h3>
+  <button class="opt" data-d="2" data-k="good"><span class="tag">A</span>先切断——把 SMARS 与市场的连接断开，止住流出，再慢慢查原因</button>
+  <button class="opt" data-d="2" data-k="bad"><span class="tag">B</span>先定位根因，找到之后再精准修复，避免误伤正常业务</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">C</span>先把异常账户的头寸限额调低，让风控自动挡住后续订单</button>
+  <button class="opt" data-d="2" data-k="bad"><span class="tag">D</span>回滚这次发布——把新代码从服务器上卸载掉</button>
+  <div class="verdict" id="v-d2">
+    <p><b class="good">A。</b>这是全书反复出现的那条原则在最高标价下的重演：<strong>先止血，再治病</strong>（第 5 章教训壹）。此刻每一秒都在产生不可撤销的成交，而"查清原因"是一个时长未知的任务。切断连接的代价是可计算的（当天这部分业务停摆），不切断的代价是<em>无上界</em>的。SEC 的认定里明确列出 Knight <strong>没有在系统自身行为异常时叫停 SMARS 的规程</strong> <span class="srcref">[S1 §21]</span>——也就是说，当天这个选项在流程上并不存在。</p>
+    <p><b class="bad">B 是真实团队走的路，也是工程师本能上最"负责任"的一条。</b>SEC 记录：Knight 主要靠技术团队<strong>在实盘交易环境里</strong>边跑边查，<em>期间系统持续发出数百万笔子单</em> <span class="srcref">[S1 §27]</span>；技术人员排障期间，Knight <strong>一直连着市场并继续发单</strong> <span class="srcref">[S1 §10]</span>。它错在一个隐含假设：<em>诊断时间是有限的</em>。当损失以秒计息时，这个假设不成立。</p>
+    <p><b class="mid">C 方向正确，但当天这条路是断的。</b>那个账户（文件中称 33 号账户）确实有一个 200 万美元的总头寸限额——<strong>但这个限额没有连到任何自动控制</strong> <span class="srcref">[S1 §23]</span>。更糟的是它混装多种来源的头寸，人员<strong>无法快速判断</strong>膨胀的头寸是什么、从哪来 <span class="srcref">[S1 §24]</span>。<em>一个不能阻止下单的限额，只是一个数字。</em></p>
+    <p><b class="bad">D 是本页最重要的一个选项，请务必读完。</b>「回滚」是所有人的肌肉记忆，当天 Knight 也这么做了：<strong>他们把已正确部署的那七台服务器上的新 RLP 代码卸载了</strong>。结果是——<strong>让情况更糟</strong>：更多进来的母单开始在那七台上也激活 Power Peg 代码，重演第八台上已经发生的事 <span class="srcref">[S1 §27]</span>。<br><br><strong>为什么回滚会放大故障？</strong>因为故障的根源不是"新代码有 bug"，而是<em>新旧代码共用同一个开关</em>。卸载新代码，等于把剩下七台也交还给亡灵。<strong>当你不知道根因时，回滚不是安全操作——它只是另一个未经测试的变更。</strong></p>
+  </div>
+</div>
+
+<div class="decision" id="d3">
+  <span class="decision-tag">决策点 D3 · 事故之前很久</span>
+  <h3>2011 年 10 月，公司刚因为一次演练遗留的测试数据损失了约 750 万美元。你负责写改进项。</h3>
+  <button class="opt" data-d="3" data-k="mid"><span class="tag">A</span>针对这次问题做三个精准修复：限制系统只在交易时段运行、收到成交后停止报价、灾备清单加一项检查</button>
+  <button class="opt" data-d="3" data-k="good"><span class="tag">B</span>把问题重述为「我们有没有足够的控制来阻止任何系统发出错误订单」，并据此普查全部下单路径</button>
+  <button class="opt" data-d="3" data-k="bad"><span class="tag">C</span>加强演练后的检查清单和人员培训</button>
+  <button class="opt" data-d="3" data-k="bad"><span class="tag">D</span>750 万在公司体量下可控，记录归档即可</button>
+  <div class="verdict" id="v-d3">
+    <p><b class="good">B。</b>这道题的答案由 SEC 亲自写在了文件里。Knight 当年的应对<strong>正是 A</strong>——三项精准修复，一项不多 <span class="srcref">[S1 §33]</span>。而 SEC 的评语是：Knight <strong>没有广泛地考虑</strong>自己是否有足够的控制来防止错误订单进入市场，<em>无论发单的是哪个系统、无论那个系统出错的具体原因是什么</em> <span class="srcref">[S1 §33]</span>。<strong>十个月后，另一个系统、另一个原因，同样的错误订单，标价 4.6 亿美元。</strong></p>
+    <p><b class="mid">A 不是错的——它是<em>不够的</em>，而这正是它危险的地方。</b>三项修复都合理、都被执行了、都关闭了工单。事故复盘最常见的失败模式就是这样：<strong>把一次事故当成一个 bug 来修，而不是当成一次抽样来读。</strong>正确的问法不是"怎么防止这件事再发生"，而是"这件事说明我们缺了哪一类控制"。</p>
+    <p><b class="bad">C 把系统问题归给了人。</b>培训与清单能降低概率，但改变不了"系统可以无限制发单"这个结构性事实。关卡二已经演示过同一个陷阱：<em>把安全寄托在人的仔细上，等于承认你没有护栏。</em></p>
+    <p><b class="bad">D 的算术是对的，风险判断是错的。</b>750 万相对公司体量确实可控——但这次损失真正的信息量不在金额，在于<strong>它证明了"错误订单可以自由流向市场"这条通路是通的</strong>。同一条通路第二次被走通时，金额由市场决定，不由你决定。</p>
+  </div>
+</div>
+
+<!-- ================= 教训 ================= -->
+<h2><span class="sec">关卡 3 · 3 教训</span>三条</h2>
+
+<div class="lesson">
+  <div class="li"><span class="num">壹</span><div><strong>部署一致性必须由机器验证，不能靠人确认。</strong>八台里漏了一台，没有第二人复核，也没有书面规程要求复核 <span class="srcref">[S1 §15][S1 §26]</span>。人工确认的失败率不是零，而且它随机器数量线性放大——8 台时你可能漏 1 台；机器数量越多，漏掉至少一台的概率越接近 1。<strong>正确的做法是让系统回答「所有节点当前运行的版本哈希是否一致」，并把这个检查作为发布完成的判据</strong>，而不是让人回答「我部署完了吗」。这和关卡一的「让机器说出它是谁」是同一条原则。</div></div>
+  <div class="li"><span class="num">貳</span><div><strong>feature flag 有生命周期，复用旧开关等于唤醒亡灵。</strong>Power Peg 停用于 2003、刹车被搬走于 2005、此后从未重测，而代码<em>始终留在生产服务器上且可被调用</em> <span class="srcref">[S1 §13][S1 §14]</span>。三个动作里任何一个做了，这次事故都不会发生：删掉死代码 / 不复用旧开关 / 动过之后重测一次。<strong>开关的正确终态是被删除，不是被留着"以防万一"</strong>——留着的每一个旧开关，都是一颗接好了引线的雷。</div></div>
+  <div class="li"><span class="num">叁</span><div><strong>预先演练过的「杀开关」价值连城，临时想出来的回滚可能致命。</strong>当天 Knight 既<em>没有</em>叫停 SMARS 的规程 <span class="srcref">[S1 §21]</span>，也<em>没有</em>事件响应的监督规程 <span class="srcref">[S1 §27]</span>；于是团队在实盘里边查边试，其中一次"回滚"直接把故障从一台放大到八台 <span class="srcref">[S1 §27]</span>。<strong>杀开关的关键不在于它存在，而在于它被演练过</strong>——你要事先知道按下去会发生什么、谁有权按、按了之后业务损失多少。没演练过的应急动作，本身就是一次未经测试的变更（第 16 章）。</div></div>
+</div>
+
+<p>SEC 的认定里有一句话，几乎可以当作本关卡的标题。它指出 Knight 缺乏足够的技术治理控制与监督规程，<strong>既不足以确保新代码的有序部署，也不足以阻止那些「已不打算再使用、却仍留在可访问市场的服务器上」的代码被激活</strong>；同时也缺乏引导员工应对重大技术与合规事件的控制与规程 <span class="srcref">[S1 §9.D]</span>。</p>
+
+<p>三个分句，正好是上面三条教训。</p>
+
+<!-- ================= 带回秒抢 ================= -->
+<h2><span class="sec">关卡 3 · 4 带回「秒抢」</span>你的系统里有几具亡灵</h2>
+
+<p>此刻的「秒抢」：约 1000 万用户、230 人，第 12 章刚交完那份秒杀作战方案。<strong>作战方案里每一条限流、降级、预扣库存，都是一个开关。</strong>开票日当天，这些开关会被大量拨动——而这正是 Knight 那天早晨的处境。</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead><tr><th>Knight 的失效点</th><th>「秒抢」的对应物</th><th>本周动作</th><th>关联</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><b>八台里漏了一台</b></td>
+        <td>灰度发布、分批重启、多可用区部署</td>
+        <td>发布流程加一道<strong>版本一致性断言</strong>：所有实例上报的构建哈希不一致就阻断发布并告警</td>
+        <td class="ch">本关 教训壹</td>
+      </tr>
+      <tr>
+        <td><b>复用旧 feature flag</b></td>
+        <td>开票开关、限流开关、降级开关、AB 实验位</td>
+        <td>建<strong>开关台账</strong>：每个开关登记创建时间、负责人、<em>预计下线时间</em>；超期未下线的开关定期清理。<strong>禁止复用已下线开关的键名</strong></td>
+        <td class="ch">第 12 章</td>
+      </tr>
+      <tr>
+        <td><b>97 封没人看的邮件</b></td>
+        <td>各种「记录但不告警」的 ERROR 日志</td>
+        <td>把日志分三档：<em>可忽略 / 需查看 / 必须响应</em>。第三档必须走值班通道，<strong>不能只发邮件</strong></td>
+        <td class="ch">第 14 章</td>
+      </tr>
+      <tr>
+        <td><b>没有叫停系统的规程</b></td>
+        <td>下单链路、预扣库存、异步落库</td>
+        <td>为每条关键链路准备一个<strong>演练过的杀开关</strong>，并在预案表里写明：谁能按、按下后业务影响是什么、恢复步骤是什么</td>
+        <td class="ch">第 12 · 16 章</td>
+      </tr>
+      <tr>
+        <td><b>限额没连到自动控制</b></td>
+        <td>库存扣减上限、单用户下单频率、支付金额阈值</td>
+        <td>逐个检查：这个阈值<strong>是能阻止请求，还是只能事后看见</strong>？只能看见的一律标记为待改造</td>
+        <td class="ch">第 10 · 11 章</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>最后一个练习，请今天就做：<strong>列出你系统里所有还开着的 feature flag，逐个问「它上一次被翻动是什么时候」和「如果现在有人把它打开，会发生什么」。</strong></p>
+
+<p>凡是回答不出第二个问题的开关，都是 Power Peg。</p>
+
+<div class="sources">
+  <h3>📄 原始来源（本页全部事实性陈述的出处）</h3>
+  <ol>
+    <li id="s1"><b>[S1]</b> 美国证券交易委员会（SEC）行政令 <em>In the Matter of Knight Capital Americas LLC</em>，
+      Securities Exchange Act Release No. 70694，File No. 3-15570，2013 年 10 月 16 日 ——
+      <a href="https://www.sec.gov/litigation/admin/2013/34-70694.pdf">https://www.sec.gov/litigation/admin/2013/34-70694.pdf</a><br>
+      <span class="srcref">本页所有 [S1 §N] 标注对应该文件的段落编号。Knight 在既不承认也不否认文件所述认定的前提下同意该行政令（§II）。</span></li>
+  </ol>
+  <p class="srcref">逐句核对清单见构建仓库 <code>sources/FACTS-level3.md</code>；来源原文留档见 <code>sources/raw/sec-34-70694-knight-capital.txt</code>。关于本次事故的第三方技术推测未被采信为事实依据。</p>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch12.html">← 第 12 章 · 秒杀架构专章——瞬时百倍流量的完整作战方案</a></span>
+    <span><a href="appendix-cards.html">附录 · 病历卡图鉴</a></span>
+    <span><a href="ch13.html">第 13 章 · 微服务拆分——以及拆分的代价 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+</body>
+</html>

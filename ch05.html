@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 章 · 缓存三兄弟——穿透、击穿、雪崩 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar"><span><b>系统是被打出来的</b> · 系统设计实战手册</span><nav aria-label="章节导航"><a href="ch04.html">← 上一章</a><a href="index.html">目录</a><a href="ch06.html">下一章 →</a></nav></div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 2 · 缓存与流量 · 第 5 章</div>
+    <h1>缓存三兄弟<br>穿透、击穿、雪崩</h1>
+    <p class="h1-sub">缓存救过你无数次，所以你从没想过它会杀了你。这一章从一次真实形态的值班现场开始，认识三种最经典的缓存死法——然后在模拟器里，亲手把系统玩坏。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">05 · 1 值班现场</span>02:47，手机在床头柜上震动</h2>
+
+<p class="lead">你是「秒抢」的后端工程师，本周 on-call。明早十点有一场顶流演唱会开票，你睡前特意检查过一遍大盘，一切正常。然后，02:47。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 02:47:12</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] order-service P99 latency &gt; 5000ms（阈值 800ms）<br>
+[<span class="r">CRITICAL</span>] mysql-primary CPU 100%，活跃连接 <span class="a">1498/1500</span><br>
+[<span class="a">WARNING</span>] &nbsp;api-gateway 5xx 比例 <span class="a">37%</span>，仍在上升<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">15 分钟前，运维群最后一条消息：</span><br>
+<span class="t">「Redis 集群滚动升级完成 ✅ 各节点版本已确认，收工」</span>
+  </div>
+</div>
+
+<p>你打开监控大盘，四个数字跳进眼睛：</p>
+
+<div class="metrics">
+  <div class="metric"><div class="k">Redis 命中率</div><div class="v">2.1%</div><div class="d down">▼ 平时 98%</div></div>
+  <div class="metric"><div class="k">DB 查询 QPS</div><div class="v">31,400</div><div class="d up">▲ 平时约 700</div></div>
+  <div class="metric"><div class="k">订单接口 P99</div><div class="v">&gt;10s</div><div class="d up">▲ 请求大面积超时</div></div>
+  <div class="metric"><div class="k">应用线程池</div><div class="v">排队 2.3 万</div><div class="d warn">● 队列持续增长</div></div>
+</div>
+
+<p>线索已经足够拼出剧情：滚动升级重启了缓存节点，<strong>内存里的数据没了</strong>。凌晨流量虽然只有白天的零头，但命中率从 98% 跌到 2%，意味着原本由缓存挡住的查询几乎全部砸向了数据库——DB 正在被它平时流量 40 多倍的洪水冲刷。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 02:49。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">A</span>紧急给数据库扩容，加从库、升配置</button>
+  <button class="opt" data-d="1" data-k="bad"><span class="tag">B</span>重启订单服务，清掉积压的线程池队列</button>
+  <button class="opt" data-d="1" data-k="good"><span class="tag">C</span>在网关层限流：只放行 DB 能承受的流量，其余直接快速失败</button>
+  <button class="opt" data-d="1" data-k="mid"><span class="tag">D</span>打电话让运维回滚 Redis 升级</button>
+  <div class="verdict" id="v-d1">
+    <p><b class="good">C 是教科书答案：先止血。</b>DB 此刻唯一需要的是喘息。把入口流量限到它容量的七八成，被拒绝的请求快速失败——用户看到「排队中，请稍后重试」，远好过整站无响应。只有 DB 活着，缓存才有机会回填（一会儿你会在模拟器里亲眼看到为什么）。</p>
+    <p><b class="bad">A 的问题是时间。</b>扩容从库要做主从同步，新实例灌满数据是分钟级到小时级的事，而你的系统正在以秒为单位恶化。故障中扩容是常见的本能反应，也是常见的无效动作。</p>
+    <p><b class="bad">B 会让事情更糟。</b>重启只是把队列清空一次，请求马上会重新灌满它；如果应用层还有本地缓存，重启连这最后一层缓冲也一起清掉了。</p>
+    <p><b class="mid">D 方向没错，但救不了现在。</b>回滚的是<em>程序版本</em>，不是<em>内存数据</em>——缓存里的数据已经没了，回滚不会让它回来。该联系运维，但不是做这件事。</p>
+  </div>
+</div>
+
+<!-- ================= 缓存的契约 ================= -->
+<h2><span class="sec">05 · 2 原理</span>缓存不是优化，是契约</h2>
+
+<p>很多人把缓存理解为「让系统更快的东西」。这个理解在你上缓存的第一天就过期了。真相是：<strong>从缓存上线那一刻起，数据库的容量就再也没打算独自接住全部流量。</strong>缓存从性能优化变成了架构依赖——这就是契约。</p>
+
+<p>契约的条款只有一行数学：</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+DB 承受的流量 = 总流量 × ( 1 − 命中率 )
+  </div>
+</div>
+
+<p>它看起来无害，直到你代入数字。假设「秒抢」白天总查询量是 20,000 QPS，数据库实际容量约 1,000 QPS：</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric"><div class="k">命中率 99%</div><div class="v" style="color:var(--green)">200</div><div class="d">QPS 到 DB</div></div>
+  <div class="metric"><div class="k">命中率 98%</div><div class="v" style="color:var(--green)">400</div><div class="d">QPS 到 DB</div></div>
+  <div class="metric"><div class="k">命中率 95%</div><div class="v" style="color:var(--amber)">1,000</div><div class="d">QPS 到 DB ⚠ 满载</div></div>
+  <div class="metric"><div class="k">命中率 90%</div><div class="v" style="color:var(--red)">2,000</div><div class="d">QPS 到 DB 💥</div></div>
+  <div class="metric"><div class="k">命中率 0%</div><div class="v" style="color:var(--red)">20,000</div><div class="d">QPS 到 DB 💀</div></div>
+</div>
+
+<p>注意从 98% 到 96% 的那一步：听起来只是「掉了两个百分点」，但 miss 率从 2% 变成 4%——<em>DB 流量翻倍</em>。命中率上的每一个百分点，都是压在数据库身上的杠杆。这也是为什么监控里最值得盯的不是命中率本身，而是 <code>总流量 × (1 − 命中率)</code> 与 DB 容量之间的余量。</p>
+
+<div class="kicker">缓存越好，契约越重。命中率 99.5% 的系统，意味着 DB 只见过 0.5% 的世面——一旦缓存出事，它面对的是自己从未经历过的 200 倍流量。这就是三兄弟共同的杀伤原理：<strong>它们杀的都不是缓存，是缓存身后那个被保护得太好的数据库。</strong></div>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">05 · 3 病历卡</span>三种死法，三张病历</h2>
+
+<p>三兄弟长得像（最后都表现为「DB 被打死」），但发病机理完全不同，处方也完全不同。诊断的关键在<strong>监控症状的形状</strong>：是缓慢渗血、单点尖刺，还是断崖塌方。</p>
+
+<div class="case-card">
+  <div class="case-head"><h3>缓存穿透</h3><span class="case-no">病历卡 No.04</span></div>
+  <div class="case-alias">Cache Penetration · 查询「根本不存在」的数据</div>
+  <div class="case-body">
+    <div class="case-row"><div class="lbl">机理</div><div class="val">请求查询一个 <strong>DB 里根本不存在</strong>的 key。缓存里自然没有，于是每次都放行到 DB；DB 查不到，也就没有东西可以回填缓存。缓存对这类请求<em>永久失效</em>——它被打穿了。</div></div>
+    <div class="case-row"><div class="lbl">症状</div><div class="val"><span class="sym">▁▂▂▃▃▄▄</span>　缓慢渗血型。命中率持续偏低或缓慢阴跌；DB 慢查询日志里出现大量<strong>返回空结果</strong>的同构查询，key 往往是无规律的 ID。</div></div>
+    <div class="case-row"><div class="lbl">易发场景</div><div class="val">恶意脚本或爬虫枚举 ID（订单号、用户 ID 逐个试）；上游 bug 传入非法参数；被删除数据的历史链接仍被外部引用。</div></div>
+    <div class="case-row"><div class="lbl">处方</div><div class="val">① <strong>缓存空值</strong>：查无此数据也缓存一个空标记，配短 TTL；② <strong>布隆过滤器</strong>：把全量合法 key 装入内存过滤器，不在集合里的请求直接拒绝（可能误放行、绝不误拦截，恰好适合当门卫）；③ 入口层参数校验与风控限速——穿透常常首先是个安全问题。</div></div>
+    <div class="case-row"><div class="lbl">案例</div><div class="val">「秒抢」上线三个月时遭遇过爬虫逐号枚举订单接口：命中率一周内从 98% 阴跌到 91%，没人在意——直到一次促销把 DB 推过了临界点。穿透的可怕在于它平时只是慢性病。</div></div>
+  </div>
+</div>
+
+<div class="case-card no5">
+  <div class="case-head"><h3>缓存击穿</h3><span class="case-no">病历卡 No.05</span></div>
+  <div class="case-alias">Hot Key Breakdown · 一个热点 key 的过期瞬间</div>
+  <div class="case-body">
+    <div class="case-row"><div class="lbl">机理</div><div class="val">某个<strong>热点 key</strong>（比如顶流演唱会的详情页，每秒被读几万次）到达 TTL 过期。过期后的那几百毫秒里，成千上万个并发请求<em>同时</em> miss，<em>同时</em>去查 DB，<em>同时</em>试图回源——DB 在一瞬间收到本该由一次回源解决的全部压力。</div></div>
+    <div class="case-row"><div class="lbl">症状</div><div class="val"><span class="sym">▁▁▁█▁▁▁</span>　单点尖刺型。DB QPS 出现毫秒级垂直尖刺后迅速回落；慢查询集中在<strong>同一条 SQL、同一个 key</strong>；时间点与该 key 的 TTL 对齐。</div></div>
+    <div class="case-row"><div class="lbl">易发场景</div><div class="val">开票页、热搜条目、首页配置——任何「读极多、key 极少」的数据。流量越大，过期瞬间的并发 miss 越密集，尖刺越致命。</div></div>
+    <div class="case-row"><div class="lbl">处方</div><div class="val">① <strong>互斥回源</strong>（singleflight）：同一 key 只放一个请求去查 DB，其余请求等它回填；② <strong>逻辑过期</strong>：物理上永不过期，值里带一个逻辑过期时间，过期后先返回旧值、异步刷新；③ <strong>热点永不过期</strong> + 由写路径主动更新。三者的取舍是本章末尾决策点 D2 的主题。</div></div>
+    <div class="case-row"><div class="lbl">案例</div><div class="val">微博曾多次在明星突发事件时服务异常（公开报道），是「热点数据 + 瞬时读放大」这一类故障最出名的反复上演——热点问题在第 8 章（热点分片）还会以另一副面孔回来。</div></div>
+  </div>
+</div>
+
+<div class="case-card no6">
+  <div class="case-head"><h3>缓存雪崩</h3><span class="case-no">病历卡 No.06</span></div>
+  <div class="case-alias">Cache Avalanche · 大面积同时失效</div>
+  <div class="case-body">
+    <div class="case-row"><div class="lbl">机理</div><div class="val">击穿是一个 key 的事故，雪崩是<strong>一大片 key 同时失效</strong>。两种触发方式：其一，<strong>同批 TTL</strong>——凌晨批量任务把十万个 key 写进缓存，全部设了同样的 3600 秒，于是一小时后它们像约好了一样同时过期；其二，<strong>缓存集群本身宕机或重启</strong>——就是你 02:47 遇到的那种。命中率断崖式归零，DB 直面全量流量。</div></div>
+    <div class="case-row"><div class="lbl">症状</div><div class="val"><span class="sym">███▁▁▁▁</span>　断崖塌方型。命中率垂直下坠；DB QPS 阶跃式打满并持续；线程池排队、上游超时，故障沿调用链向上蔓延成级联故障（病历卡 No.09）。</div></div>
+    <div class="case-row"><div class="lbl">易发场景</div><div class="val">定时任务统一写缓存；缓存集群升级、重启、故障切换；容器整批调度重建——任何让「很多 key 的生死绑在同一时刻」的操作。</div></div>
+    <div class="case-row"><div class="lbl">处方</div><div class="val">① <strong>TTL 加随机抖动</strong>：3600 秒变成 3600±600 秒，把同一时刻的过期洪峰摊平成细流；② <strong>集群高可用</strong>：主从 + 持久化 + 分片，避免「重启 = 数据清零」；③ <strong>熔断限流兜底</strong>：假设雪崩终会发生，确保 DB 在最坏情况下只收到它能承受的流量；④ <strong>预热与慢放量</strong>：缓存恢复后不等于战斗结束——冷缓存需要先灌数据再逐步放开入口。</div></div>
+    <div class="case-row"><div class="lbl">案例</div><div class="val">Facebook 在 2010 年的一次著名故障中，因配置校验逻辑的错误，所有客户端将缓存值判为无效并同时涌向数据库集群，最终不得不整站下线才恢复，全程约两个半小时（官方复盘公开）。这次事故的完整推演是本 Part 实战关卡的姊妹篇。</div></div>
+  </div>
+</div>
+
+<p>把三张病历叠在一起看，规律浮出来了：<strong>穿透杀慢刀（缓存永远不接手）、击穿扎一针（一个 key 的瞬间）、雪崩塌一片（一群 key 的同时）。</strong>下次盯着大盘时，先看命中率曲线的形状——形状就是诊断。</p>
+
+</div><!-- /wrap -->
+
+<!-- ================= 模拟器 ================= -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">05 · 4 模拟器</span>在浏览器里把系统玩坏</h2>
+
+<p style="max-width:760px">下面是一个活的「秒抢」微缩模型：请求从左往右流过缓存、砸向数据库。它遵守你刚学的那条契约，也会像真实系统一样死掉。<strong>生产环境不给你的练习机会，这里管够。</strong></p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">CACHE AVALANCHE SIMULATOR · 秒抢监控大盘</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="模拟监控图表：DB 请求量、命中率与错误率随时间变化"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--amber)"></i>到达 DB 的 QPS</span>
+    <span><i style="background:var(--faint);height:2px"></i>DB 容量线</span>
+    <span><i style="background:var(--teal)"></i>缓存命中率 %</span>
+    <span><i style="background:var(--red)"></i>请求错误率 %</span>
+  </div>
+
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">缓存命中率</div><div class="v" id="m-hit" style="color:var(--teal)">—</div></div>
+    <div class="sim-metric"><div class="k">到达 DB 的 QPS</div><div class="v" id="m-db" style="color:var(--amber)">—</div></div>
+    <div class="sim-metric"><div class="k">DB 状态</div><div class="v" id="m-state">—</div></div>
+    <div class="sim-metric"><div class="k">P99 延迟</div><div class="v" id="m-p99">—</div></div>
+    <div class="sim-metric"><div class="k">请求错误率</div><div class="v" id="m-err" style="color:var(--red)">—</div></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn danger" id="btn-crash">💥 缓存集群宕机</button>
+    <label class="toggle"><input type="checkbox" id="tg-jitter">TTL 随机抖动</label>
+    <label class="toggle"><input type="checkbox" id="tg-breaker">熔断限流（网关按 DB 容量 85% 放行）</label>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+
+  <div class="sliders">
+    <div class="slider"><label>总流量 <span id="lb-qps">10,000 QPS</span></label>
+      <input type="range" id="sl-qps" min="2000" max="30000" step="1000" value="10000"></div>
+    <div class="slider"><label>DB 容量 <span id="lb-cap">800 QPS</span></label>
+      <input type="range" id="sl-cap" min="200" max="3000" step="100" value="800"></div>
+  </div>
+
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 三个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>看见「同批过期」。</strong>什么都别动，观察约一分钟：每隔一段时间，命中率会规律性跳水一次——那是一批同 TTL 的 key 集体过期，DB 上随之出现一根根尖刺。现在勾选 <em>TTL 随机抖动</em>，看洪峰如何被摊平成细流。这就是一行 <code>ttl += random(±10%)</code> 的全部价值。</li>
+    <li><strong>复现 02:47，并发现「重启救不活」。</strong>点 <em>💥 缓存集群宕机</em>：命中率归零，DB 数秒内过载崩溃。现在点「恢复缓存集群」——注意，<em>系统并没有恢复</em>。缓存是冷的，回填数据要靠 DB 查询，可 DB 一活过来就被全量流量再次打死。冷缓存、死 DB、全量流量，三者互相锁死——这叫<strong>死亡螺旋</strong>，也是「为什么回滚/重启解决不了雪崩」的直观答案。</li>
+    <li><strong>用熔断打破螺旋。</strong>保持宕机后的惨状，勾选 <em>熔断限流</em>：网关只放行 DB 容量的 85%，其余请求快速失败。看 DB 重启存活 → 命中率沿着一条上升曲线爬回去 → 错误率随之归零。代价是恢复期内一部分用户请求失败——<strong>「部分失败」换「整体存活」，这就是止血的全部含义</strong>，也是决策点 D1 里 C 选项的数学证明。</li>
+  </ol>
+</div>
+</div><!-- /wide -->
+
+<div class="wrap">
+
+<!-- ================= 决策点 D2 ================= -->
+<h2><span class="sec">05 · 5 权衡</span>没有正确答案，只有代价</h2>
+
+<p>回到白天。复盘会上，团队决定给「演唱会详情页」这类热点 key 上击穿保护。三个候选方案摆在桌上——<strong>每一个都是对的，每一个都有账单。</strong>点开看你愿意付哪一份。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>顶流演唱会详情页，单 key 峰值 5 万次读/秒。选哪种过期保护？</h3>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">A</span>互斥回源（singleflight）：过期时只放一个请求查 DB，其余等待</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">B</span>逻辑过期：物理永不过期，过期后先返回旧值、后台异步刷新</button>
+  <button class="opt" data-d="2" data-k="mid"><span class="tag">C</span>永不过期：写路径负责在数据变更时主动更新缓存</button>
+  <div class="verdict" id="v-d2">
+    <p><b class="mid">A · 互斥回源</b>：DB 绝对安全，数据始终新鲜。<strong>账单：</strong>过期瞬间有一批请求要原地等待回源完成，P99 出现毛刺；跨实例互斥需要分布式锁，你为了保护一个依赖又引入了一个新依赖。适合回源成本高、能容忍延迟毛刺的数据。</p>
+    <p><b class="mid">B · 逻辑过期</b>：用户永远无等待，DB 永远只有一个异步刷新请求。<strong>账单：</strong>刷新窗口内所有人读到的是旧数据（最终一致）；实现复杂度最高，还需要兜底任务防止「异步刷新失败后永远陈旧」。适合读极多、对新鲜度不敏感的数据。</p>
+    <p><b class="mid">C · 永不过期 + 写时更新</b>：读路径最简单，没有过期这回事。<strong>账单：</strong>缓存一致性的全部责任转移到写路径——任何一处更新遗漏，就是<em>永久</em>脏数据；key 集合必须有限可控，否则内存只进不出。适合 key 少、写入口收敛的配置类数据。</p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">「秒抢」的选择：详情页走 <strong>B</strong>——开票前八小时，票价从 1280 改成 1281 晚十秒被看到，没人在乎；但接口卡 200ms，热搜上见。而<strong>库存</strong>这个 key 三个方案全都不敢用：它对旧值零容忍，这个难题要等第 10 章「超卖！」正面解决。</p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">05 · 6 复盘</span>那一夜后来怎么样了</h2>
+
+<p>回放 02:47 的正确剧本——留意每个动作的<strong>顺序</strong>，顺序本身就是知识：</p>
+
+<div class="timeline">
+  <div class="tl"><span class="tt">02:49</span><p><strong>止血。</strong>网关限流至 DB 容量的 80%，超出部分返回「排队中」友好页。DB 连接数从 1498 回落到 600，恢复响应。</p></div>
+  <div class="tl"><span class="tt">02:55</span><p><strong>预热。</strong>跑预热脚本，把明早开票场次、热门场馆等头部 key 主动灌回缓存——让最值钱的 2% 的 key 先复活，命中率从 2% 拉回 71%。</p></div>
+  <div class="tl"><span class="tt">03:10</span><p><strong>放量。</strong>限流阈值 50% → 80% → 100% 逐级放开，每一级观察五分钟。命中率回到 97%，P99 回到 180ms。</p></div>
+  <div class="tl"><span class="tt">04:02</span><p><strong>解除。</strong>全量恢复。你在故障群发了最后一条消息，定了 10:00 前的两个 action item，睡了三个小时。</p></div>
+</div>
+
+<div class="lesson">
+  <div class="li"><span class="num">壹</span><div><strong>先止血，再治病。</strong>故障处置的第一目标不是「修好」，是「别让它继续恶化」。限流降级永远先于根因修复——根因可以天亮再查，雪崩不等天亮。</div></div>
+  <div class="li"><span class="num">贰</span><div><strong>缓存重启 ≠ 缓存恢复。</strong>进程活了，数据还是冷的。没有预热和慢放量的「恢复」，只是死亡螺旋的下一圈。把预热脚本写在故障发生<em>之前</em>。</div></div>
+  <div class="li"><span class="num">叁</span><div><strong>给运维动作标上流量风险。</strong>「滚动升级缓存集群」在变更评审里看起来人畜无害——如果没人问一句「重启后命中率会怎样」。所有触碰缓存生死的变更，都该在低峰执行并预挂限流预案。</div></div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">05 · 7 自测</span>你能一眼认出它们吗</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">监控显示：DB QPS 每到整点出现一根规律性尖峰，随后回落；命中率在同一时刻短暂跳水后快速恢复。最可能是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>缓存穿透</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">B</span>缓存击穿（单个热点 key）</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">C</span>雪崩的「同批过期」形态</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>数据库热点分片</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">C。</b>「整点 + 规律性 + 一批」指向定时任务写入的同批 TTL 集体过期——雪崩的温和形态（你在模拟器实验①里见过它）。如果尖峰只对应<em>某一个</em> key、时间点与该 key 的 TTL 对齐，才是击穿（B）；穿透（A）的形状是持续渗血而非规律尖峰。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 契约算术</h3>
+  <p class="stem">总流量 20,000 QPS，命中率从 99% 跌到 90%。到达 DB 的流量变成原来的几倍？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">A</span>约 1.1 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>5 倍</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>9 倍</button>
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">D</span>10 倍</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">D。</b>看 miss 率而不是命中率：1% → 10%，即 200 QPS → 2,000 QPS，十倍。「命中率只掉了 9 个点」是故障群里最危险的一句安慰话。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 对症下药</h3>
+  <p class="stem">安全团队发现有脚本在逐个枚举不存在的订单号刷接口。最对症的处方组合是？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">A</span>布隆过滤器 + 缓存空值</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>互斥回源 + 逻辑过期</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>TTL 抖动 + 集群高可用</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>数据库扩容</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">A。</b>这是穿透（查不存在的数据），布隆过滤器在入口直接拒绝不合法 key，空值缓存兜住漏网之鱼。B 是击穿的处方，C 是雪崩的处方，D 是给对手升级武器。开错药方的前提是诊断错误——所以 Q1 那道题最重要。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 死亡螺旋</h3>
+  <p class="stem">缓存集群宕机，DB 已被打死。你重启了 DB，它几秒内再次被打死。下一步最应该做什么？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>升配置换更大的 DB 实例再重启</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>先在入口限流，再重启 DB，随后预热缓存、逐步放量</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>先恢复缓存集群，等待缓存自然回填</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>重启全部应用服务，清空重试队列</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>这正是模拟器实验②③的剧情。C 是最诱人的错误答案：缓存回填<em>依赖 DB 活着</em>——冷缓存挡不住流量，DB 就活不了；DB 活不了，缓存就永远是冷的。锁死这个循环的唯一钥匙在流量入口，不在存储层。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq"><b>「Redis 突然全挂了，系统会发生什么？怎么办？」</b><span class="ans">答题骨架：契约公式说明 DB 将承受多少倍流量 → 止血（限流降级）→ 恢复（高可用切换/重启）→ 预热 → 慢放量 → 复盘单点问题。能主动讲出「冷缓存死亡螺旋」是强信号。</span></div>
+  <div class="iq"><b>「穿透、击穿、雪崩的区别与对策？」</b><span class="ans">别背处方，先讲症状形状（渗血 / 尖刺 / 断崖）再对症给药——展示的是诊断能力而非记忆力。</span></div>
+  <div class="iq"><b>「命中率降到多少需要告警？」</b><span class="ans">反直觉加分点：不看命中率绝对值，看 <code>总流量 × (1 − 命中率)</code> 相对 DB 容量的余量。命中率 90% 在小流量系统里岁月静好，在大流量系统里已经着火。</span></div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch04.html">← 第 4 章 · 上缓存——以及你签下的一致性契约</a></span>
+    <span><a href="appendix-cards.html">病历卡 No.04–06 已收录于附录图鉴</a></span>
+    <span><a href="ch06.html">第 6 章 · 限流与降级——学会说「不」 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-2.js"></script>
+</body>
+</html>

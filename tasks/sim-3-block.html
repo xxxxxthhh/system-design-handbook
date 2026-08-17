@@ -1,0 +1,51 @@
+<h2><span class="sec">06 · 4 模拟器</span>同一波突发，三种态度</h2>
+<p style="max-width:760px">把完全相同的到达序列同时注入令牌桶、漏桶和滑动窗口；曲线形状会直接告诉你，每种算法愿意怎样把突发交给下游。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">RATE LIMIT SIMULATOR · 秒抢网关</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="到达 QPS 与三种限流算法的放行和拒绝 QPS"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--text)"></i>到达</span>
+    <span><i style="background:var(--amber)"></i>令牌桶</span>
+    <span><i style="background:var(--teal)"></i>漏桶</span>
+    <span><i style="background:var(--red)"></i>滑动窗口</span>
+    <span>虚线 = 拒绝，灰虚线 = 配额</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">到达</div><div class="v" id="m-arrival">—</div></div>
+    <div class="sim-metric"><div class="k">令牌桶放行</div><div class="v" id="m-token">—</div></div>
+    <div class="sim-metric"><div class="k">漏桶流出</div><div class="v" id="m-leak">—</div></div>
+    <div class="sim-metric"><div class="k">滑动窗口放行</div><div class="v" id="m-window">—</div></div>
+    <div class="sim-metric"><div class="k">三路合计拒绝</div><div class="v" id="m-rejected">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-burst">⚡ 注入突发</button>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>突发倍数 <span id="lb-multiplier">5×</span></label>
+      <input type="range" id="sl-multiplier" min="2" max="20" step="1" value="5"></div>
+    <div class="slider"><label>基础 QPS <span id="lb-base">80 QPS</span></label>
+      <input type="range" id="sl-base" min="10" max="1000" step="10" value="80"></div>
+    <div class="slider"><label>配额 limit <span id="lb-limit">100 QPS</span></label>
+      <input type="range" id="sl-limit" min="1" max="1000" step="1" value="100"></div>
+    <div class="slider"><label>令牌桶桶深 burst <span id="lb-burst">100 tokens</span></label>
+      <input type="range" id="sl-burst" min="10" max="500" step="10" value="100"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>看形状。</strong>点「注入突发」→ 令牌桶先冒出高于配额的尖头再回落，漏桶在有积压时保持配额直线，滑动窗口以离散台阶响应；突发期令牌桶累计放行更多且方差更大。<strong>形状就是算法对突发的态度。</strong></li>
+    <li><strong>把桶做深。</strong>先用桶深 20 注入，再改 40 重置并重复 → 桶深翻倍后令牌桶的突发峰值严格升高。<strong>桶深是把突发转嫁给下游的旋钮。</strong></li>
+    <li><strong>压低配额。</strong>把配额调到低于基础 QPS，等待稳态 → 三种算法的放行量都以小于 10% 的误差收敛到配额，彼此差异也小于 10%。<strong>稳态下算法之争是瞬态问题。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->

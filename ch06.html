@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 章 · 限流与降级——学会说「不」 | 系统是被打出来的</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header>
+  <div class="book-bar">
+    <span><b>系统是被打出来的</b> · 系统设计实战手册</span>
+    <nav aria-label="章节导航">
+      <a href="ch05.html">← 上一章</a>
+      <a href="index.html">目录</a>
+      <a href="ch07.html">下一章 →</a>
+    </nav>
+  </div>
+  <div class="chapter-head">
+    <div class="eyebrow">PART 2 · 缓存与流量 · 第 6 章</div>
+    <h1>限流与降级<br>学会说「不」</h1>
+    <p class="h1-sub">市场部买下一块开屏广告，却忘了通知技术团队。五倍流量同时抵达时，你第一次必须主动拒绝用户——不是因为系统不想服务，而是因为核心链路要活着服务。</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ================= 值班现场 ================= -->
+<h2><span class="sec">06 · 1 值班现场</span>14:05，会议室里的大盘突然变红</h2>
+
+<p class="lead">创业第 1 年 9 个月，「秒抢」累计用户约 50 万。公司 70 人，后端 14 人。周二下午你正在会议室做迭代评审，产品 Mia 的手机弹出市场投放截图：开屏广告已上线。她刚说完「他们好像没走技术评审」，大屏上的入口曲线就竖了起来。</p>
+
+<div class="pager" aria-label="P0 告警">
+  <div class="pager-top"><span class="dot" aria-hidden="true"></span>PagerDuty · P0 · 触发于 14:05:17</div>
+  <div class="pager-body">
+[<span class="r">CRITICAL</span>] api-gateway arrival <span class="a">60,800 QPS</span>（基线约 12,000）<br>
+[<span class="r">CRITICAL</span>] order-service P99 <span class="a">4.8s</span>，5xx 22.6%<br>
+[<span class="a">WARNING</span>] &nbsp;DB 已验证安全吞吐 <span class="t">15,000 QPS</span>，当前到达持续上升<br>
+<span class="g">──────────────────────────────────────</span><br>
+<span class="g">Mia：</span><br>
+<span class="t">「开屏广告计划投两小时，市场部以为扩容会自动发生。」</span>
+  </div>
+</div>
+
+<p>阿凯在群里先吼了一句：「五倍了！」你把请求按业务拆开：流量最大的不是下单，而是广告落地页带来的推荐、榜单和历史订单查询。核心交易只占一小部分，却正和这些可以晚点看的请求抢线程、连接和缓存带宽。</p>
+
+<div class="metrics">
+  <div class="metric">
+    <div class="k">入口到达</div>
+    <div class="v">60,800 QPS</div>
+    <div class="d up">▲ 约 5 倍基线</div>
+  </div>
+  <div class="metric">
+    <div class="k">已验证容量</div>
+    <div class="v">15,000 QPS</div>
+    <div class="d warn">● 压测安全线</div>
+  </div>
+  <div class="metric">
+    <div class="k">非核心读占比</div>
+    <div class="v">71%</div>
+    <div class="d up">▲ 推荐/榜单/历史</div>
+  </div>
+  <div class="metric">
+    <div class="k">核心交易占比</div>
+    <div class="v">12%</div>
+    <div class="d down">● 下单/支付/退款</div>
+  </div>
+</div>
+
+<p>扩容来不及，60,800 也不会因为你盯着大盘就变成 15,000。线索指向同一件事：先把进入核心系统的总量封顶，再从配额里优先保住下单、支付与退款；推荐、榜单和历史订单可以返回简化页或稍后重试。</p>
+
+<div class="decision" id="d1">
+  <span class="decision-tag">决策点 D1</span>
+  <h3>此刻是 14:06。你的第一个动作是什么？</h3>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">A</span>
+    立刻把应用实例扩成五倍，等待自动扩容完成
+  </button>
+  <button class="opt" data-d="1" data-k="bad">
+    <span class="tag">B</span>
+    让客户端遇到 5xx 后立即重试三次，提高成功机会
+  </button>
+  <button class="opt" data-d="1" data-k="good">
+    <span class="tag">C</span>
+    网关总配额设为 15,000 QPS，优先交易；关闭推荐、榜单和历史订单
+  </button>
+  <button class="opt" data-d="1" data-k="mid">
+    <span class="tag">D</span>
+    把数据库连接池和工作线程都调大五倍
+  </button>
+  <div class="verdict" id="v-d1">
+    <p>
+      <b class="good">C 是教科书答案：先选择谁能进入。</b>
+      15,000 QPS 是压测验证过的安全吞吐，网关先封顶总量，再把配额留给下单、支付、退款。非核心功能返回降级结果，用户会少看到一些内容，但交易链路获得确定的资源边界。
+    </p>
+    <p>
+      <b class="bad">A 的问题是时间与瓶颈位置。</b>
+      拉起实例、预热缓存和建立连接按分钟计，系统按秒恶化；应用扩成五倍也不会让数据库容量同步变成五倍。扩容是恢复容量的后续动作，不是此刻的入口刹车。
+    </p>
+    <p>
+      <b class="bad">B 会让事情更糟。</b>
+      60,800 QPS 若失败后立即尝试三次，最坏会把重试流量叠到原请求上。第 7 章会完整拆解这类“为了成功而重试，结果把下游压死”的放大链。
+    </p>
+    <p>
+      <b class="mid">D 方向没错，但救不了现在。</b>
+      若瓶颈真在过小的应用池，适度调整可能有用；但当前到达量已是验证容量约四倍。把并发闸门开大，只会让更多请求同时争抢下游，必须先把总量压住。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 原理 ================= -->
+<h2><span class="sec">06 · 2 原理</span>配额决定总量，算法决定波形</h2>
+
+<p>限流先回答一个朴素问题：已知系统每秒能安全处理多少，就不让更多请求穿过护栏。到达量低于配额时正常放行；到达量高于配额时，超出的请求必须排队、降级或拒绝。</p>
+
+<div class="pager" style="border-color:var(--line)">
+  <div class="pager-body" style="font-size:15px;text-align:center">
+实际通过量 = min( 到达量, 配额 )
+  </div>
+</div>
+
+<p>把现场数字代进去：配额 15,000 QPS，到达 60,800 QPS，实际通过量是 15,000 QPS，约 45,800 QPS 要被拒绝或降级；若投放结束后到达降到 8,000 QPS，则通过 8,000 QPS，不该为了“配额用满”制造额外请求。</p>
+
+<div class="metrics" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">
+  <div class="metric">
+    <div class="k">到达 8,000</div>
+    <div class="v" style="color:var(--green)">通过 8,000</div>
+    <div class="d">低于配额</div>
+  </div>
+  <div class="metric">
+    <div class="k">到达 15,000</div>
+    <div class="v" style="color:var(--teal)">通过 15,000</div>
+    <div class="d">贴住配额</div>
+  </div>
+  <div class="metric">
+    <div class="k">到达 60,800</div>
+    <div class="v" style="color:var(--amber)">通过 15,000</div>
+    <div class="d">拒绝约 45,800</div>
+  </div>
+  <div class="metric">
+    <div class="k">入口削减</div>
+    <div class="v" style="color:var(--red)">约 75.3%</div>
+    <div class="d">保护核心系统</div>
+  </div>
+</div>
+
+<p><strong>「限流不是拒绝用户，是选择先拒绝谁。」</strong>如果只按到达顺序随机拒绝，退款可能和推荐页拿到同样待遇；真正的生产限流还要有优先级、租户隔离与保底配额。总量护栏回答“放多少”，业务分层回答“先放谁”。</p>
+
+<p>令牌桶、漏桶和滑动窗口都能执行配额，但对突发的态度不同：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>算法</th>
+        <th>波形</th>
+        <th>优势</th>
+        <th>账单</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>令牌桶</strong></td>
+        <td>积攒令牌后先放一个高于配额的尖头，再回落</td>
+        <td>允许短突发，平均速率仍受控</td>
+        <td>桶越深，转嫁给下游的瞬时峰值越高</td>
+      </tr>
+      <tr>
+        <td><strong>漏桶</strong></td>
+        <td>有积压时以近似恒定速率流出</td>
+        <td>下游看到平滑直线，容量规划简单</td>
+        <td>突发被改写成等待，队列满后仍要丢弃</td>
+      </tr>
+      <tr>
+        <td><strong>滑动窗口</strong></td>
+        <td>按最近时间窗计数，呈离散台阶响应</td>
+        <td>规则直观，能表达用户或接口维度配额</td>
+        <td>状态与计算成本较高，窗口边界仍需谨慎实现</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p>限流只决定流量能否进入，降级决定进入后少做什么。事故中先画出服务层级，能避免每个团队都声称自己的功能“不可关”：</p>
+
+<div class="tbl-wrap">
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th>层级</th>
+        <th>功能</th>
+        <th>过载动作</th>
+        <th>业务理由</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>L0 保住</strong></td>
+        <td>下单、支付、退款</td>
+        <td>保底配额、独立线程池、优先队列</td>
+        <td>直接影响钱与履约，读错或拒绝代价高</td>
+      </tr>
+      <tr>
+        <td><strong>L1 简化</strong></td>
+        <td>场次详情、购票资格</td>
+        <td>返回精简字段、使用短时旧值</td>
+        <td>交易需要，但可以少做昂贵拼装</td>
+      </tr>
+      <tr>
+        <td><strong>L2 关闭</strong></td>
+        <td>推荐、榜单、历史订单</td>
+        <td>静态兜底、稍后再试或直接隐藏</td>
+        <td>暂时缺席不会破坏正在进行的交易</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="kicker">限流是容量护栏，降级是业务取舍。只有两者合在一起，系统才不会一边精准地拒绝请求，一边把宝贵配额花在最不重要的功能上。</div>
+
+<p>第 5 章 D1 用入口限流打破缓存雪崩的死亡螺旋，本章把那次临时止血制度化。第 12 章会把网关限流放进秒杀漏斗的第二层，让入口洪峰经过静态化、配额和排队后才接近库存。</p>
+
+<!-- ================= 病历卡 ================= -->
+<h2><span class="sec">06 · 3 病历卡</span>今天的护栏，挡住明天的级联</h2>
+
+<p>本章不新增病历卡。限流与降级是给已有故障开出的兜底处方，也是对下一章级联故障的前向设防。</p>
+
+<div class="case-ref">
+  <span class="no">病历卡 No.06</span><span class="nm">缓存雪崩</span><span class="sym">███▁▁▁▁</span>
+  缓存断崖失效时，入口配额让 DB 只接收可承受的回源量；降级则把推荐、榜单等非核心读从恢复期移走。<a href="ch05.html">第 5 章回顾 →</a>
+</div>
+
+<div class="case-ref fwd">
+  <span class="no">病历卡 No.09</span><span class="nm">级联故障</span><span class="sym">███▇▅▃▁</span>
+  当一个下游过载，上游继续等待与重试，故障会沿调用链逐层熄灭；入口限流、服务隔离与降级能阻断传播。<a href="ch07.html">第 7 章定义 →</a>
+</div>
+
+<p>两张形状放在一起看：No.06 是缓存命中率先断崖，No.09 是服务可用性从下游向上游逐层熄灭。限流的价值不是让曲线好看，而是在第一层资源饱和时就结束传播。</p>
+
+</div><!-- /wrap -->
+<div class="wide" style="padding:0 22px">
+<h2><span class="sec">06 · 4 模拟器</span>同一波突发，三种态度</h2>
+<p style="max-width:760px">把完全相同的到达序列同时注入令牌桶、漏桶和滑动窗口；曲线形状会直接告诉你，每种算法愿意怎样把突发交给下游。</p>
+
+<div class="sim" id="sim">
+  <div class="sim-head">
+    <span class="sim-title">RATE LIMIT SIMULATOR · 秒抢网关</span>
+    <span class="sim-clock" id="clock">02:47:00</span>
+  </div>
+  <canvas id="chart" width="1760" height="500" role="img" aria-label="到达 QPS 与三种限流算法的放行和拒绝 QPS"></canvas>
+  <div class="legend">
+    <span><i style="background:var(--text)"></i>到达</span>
+    <span><i style="background:var(--amber)"></i>令牌桶</span>
+    <span><i style="background:var(--teal)"></i>漏桶</span>
+    <span><i style="background:var(--red)"></i>滑动窗口</span>
+    <span>虚线 = 拒绝，灰虚线 = 配额</span>
+  </div>
+  <div class="sim-grid">
+    <div class="sim-metric"><div class="k">到达</div><div class="v" id="m-arrival">—</div></div>
+    <div class="sim-metric"><div class="k">令牌桶放行</div><div class="v" id="m-token">—</div></div>
+    <div class="sim-metric"><div class="k">漏桶流出</div><div class="v" id="m-leak">—</div></div>
+    <div class="sim-metric"><div class="k">滑动窗口放行</div><div class="v" id="m-window">—</div></div>
+    <div class="sim-metric"><div class="k">三路合计拒绝</div><div class="v" id="m-rejected">—</div></div>
+  </div>
+  <div class="controls">
+    <button class="btn danger" id="btn-burst">⚡ 注入突发</button>
+    <span style="flex:1"></span>
+    <button class="btn" id="btn-pause">暂停</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div class="sliders">
+    <div class="slider"><label>突发倍数 <span id="lb-multiplier">5×</span></label>
+      <input type="range" id="sl-multiplier" min="2" max="20" step="1" value="5"></div>
+    <div class="slider"><label>基础 QPS <span id="lb-base">80 QPS</span></label>
+      <input type="range" id="sl-base" min="10" max="1000" step="10" value="80"></div>
+    <div class="slider"><label>配额 limit <span id="lb-limit">100 QPS</span></label>
+      <input type="range" id="sl-limit" min="1" max="1000" step="1" value="100"></div>
+    <div class="slider"><label>令牌桶桶深 burst <span id="lb-burst">100 tokens</span></label>
+      <input type="range" id="sl-burst" min="10" max="500" step="10" value="100"></div>
+  </div>
+  <div class="sim-log" id="log" aria-live="polite"></div>
+</div>
+
+<div class="experiments" style="max-width:760px;margin-left:auto;margin-right:auto">
+  <h3>🧪 3 个实验（按顺序做）</h3>
+  <ol>
+    <li><strong>看形状。</strong>点「注入突发」→ 令牌桶先冒出高于配额的尖头再回落，漏桶在有积压时保持配额直线，滑动窗口以离散台阶响应；突发期令牌桶累计放行更多且方差更大。<strong>形状就是算法对突发的态度。</strong></li>
+    <li><strong>把桶做深。</strong>先用桶深 20 注入，再改 40 重置并重复 → 桶深翻倍后令牌桶的突发峰值严格升高。<strong>桶深是把突发转嫁给下游的旋钮。</strong></li>
+    <li><strong>压低配额。</strong>把配额调到低于基础 QPS，等待稳态 → 三种算法的放行量都以小于 10% 的误差收敛到配额，彼此差异也小于 10%。<strong>稳态下算法之争是瞬态问题。</strong></li>
+  </ol>
+</div>
+</div><!-- /wide -->
+<div class="wrap">
+
+<!-- ================= 权衡 ================= -->
+<h2><span class="sec">06 · 5 权衡</span>统一闸门，还是服务自治</h2>
+
+<p>限流放在哪里，决定谁看得到业务语义、谁能执行全局预算。网关擅长统一入口，各服务最清楚自身容量，两级配额把两者叠在一起。三个方案都对，但治理成本与失效方式不同。</p>
+
+<div class="decision" id="d2">
+  <span class="decision-tag">决策点 D2</span>
+  <h3>「秒抢」的限流应该由哪一层负责？</h3>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">A</span>
+    网关统一限流：入口处执行总量与用户配额
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">B</span>
+    各服务自治：订单、支付、退款分别保护自己
+  </button>
+  <button class="opt" data-d="2" data-k="mid">
+    <span class="tag">C</span>
+    两级限流：网关总预算 + 服务局部并发护栏
+  </button>
+  <div class="verdict" id="v-d2">
+    <p>
+      <b class="mid">A · 网关统一</b>：策略集中、变更快，能按用户、IP、租户做一致配额，流量在消耗内部资源前就被挡住。
+      <strong>账单：</strong>网关不知道每个服务的实时瓶颈，规则错误会产生大范围影响；内部调用绕过网关时得不到保护。适合公网入口明确、团队需要快速统一治理的系统。
+    </p>
+    <p>
+      <b class="mid">B · 服务自治</b>：服务最了解线程池、依赖和业务优先级，能按局部健康动态调整。
+      <strong>账单：</strong>每个团队重复实现算法与观测，策略口径容易漂移；请求走到服务才被拒绝，前面资源已经花掉。适合依赖差异大、内部调用多、团队自治成熟的系统。
+    </p>
+    <p>
+      <b class="mid">C · 两级限流</b>：网关封住总流量，服务再按自身容量保护最后一层，单个规则失准时仍有第二道护栏。
+      <strong>账单：</strong>要协调两层配额、错误码与指标，避免同一请求被重复计费；排障要分清是哪道闸门拒绝。适合核心链路多、需要全局与局部双重保护的系统。
+    </p>
+    <p style="border-top:1px solid var(--line);padding-top:12px;margin-top:14px">
+      「秒抢」的选择：采用 <strong>C</strong>。网关按压测容量封住站点总量并执行用户公平性，订单、支付、退款各自设并发上限与保底配额。理由是约 50 万用户阶段流量入口已复杂，单靠网关看不见支付渠道变慢，单靠服务又挡不住广告洪峰在内部消耗连接。
+    </p>
+  </div>
+</div>
+
+<!-- ================= 复盘 ================= -->
+<h2><span class="sec">06 · 6 复盘</span>那块开屏广告没有下线</h2>
+
+<p>回放 14:05 的正确剧本——市场投放继续，但系统不再试图接住每一个请求：</p>
+
+<div class="timeline">
+  <div class="tl">
+    <span class="tt">14:06</span>
+    <p><strong>封顶总量。</strong>网关配额设为 15,000 QPS，超额请求返回带退避时间的繁忙页。order-service P99 从 4.8s 降到 1.3s，5xx 停止上升。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">14:08</span>
+    <p><strong>按价值降级。</strong>关闭推荐和榜单，历史订单返回稍后再试；释放的配额转给下单、支付、退款。核心交易成功率从 76% 回升到 96.8%。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">14:14</span>
+    <p><strong>校准配额。</strong>观察 DB、缓存和线程池余量，将总配额从 15,000 微调到 16,500 QPS；每次只加 5%，核心 P99 稳在 420ms 内。</p>
+  </div>
+  <div class="tl">
+    <span class="tt">14:31</span>
+    <p><strong>恢复层级。</strong>流量回落到约 24,000 QPS 后，先恢复历史订单，再恢复榜单；推荐继续用静态兜底。广告没撤，交易链路保持可用。</p>
+  </div>
+</div>
+
+<div class="lesson">
+  <div class="li">
+    <span class="num">壹</span>
+    <div><strong>配额来自验证，不来自愿望。</strong>15,000 QPS 是压测和生产余量共同给出的护栏；把阈值写成市场目标，只会让告警晚一点响。</div>
+  </div>
+  <div class="li">
+    <span class="num">貳</span>
+    <div><strong>降级顺序必须预先排好。</strong>事故中再争论推荐和退款谁重要，会把恢复时间花在会议上；层级、开关、负责人和用户文案都应提前演练。</div>
+  </div>
+  <div class="li">
+    <span class="num">叁</span>
+    <div><strong>拒绝也要可观测、可解释。</strong>记录哪层、哪条规则、哪个优先级拒绝了请求，并给客户端明确退避时间，才能防止快速失败变成快速重试。</div>
+  </div>
+</div>
+
+<!-- ================= 自测 ================= -->
+<h2><span class="sec">06 · 7 自测</span>你会先拒绝谁</h2>
+
+<div class="quiz" id="q1">
+  <h3>Q1 · 看形状诊断</h3>
+  <p class="stem">一条调用链的可用性曲线呈 <span class="sym">███▇▅▃▁</span>：下游先过载，上游随后因等待与资源耗尽逐层熄灭。这最接近哪张病历？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">A</span>缓存穿透</button>
+    <button class="opt" data-q="q1" data-k="good"><span class="tag">B</span>级联故障</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">C</span>双写不一致</button>
+    <button class="opt" data-q="q1" data-k="bad"><span class="tag">D</span>主从复制延迟</button>
+  </div>
+  <div class="verdict" id="v-q1"><p><b class="good">B。</b>逐层熄灭是 No.09 的形状，本章用限流与隔离前向设防。A 很诱人，因为穿透也会把压力送到 DB，但它通常表现为缓慢渗血；这里强调的是故障沿依赖链向上游传播。</p></div>
+</div>
+
+<div class="quiz" id="q2">
+  <h3>Q2 · 配额算术</h3>
+  <p class="stem">到达量 60,800 QPS，配额 15,000 QPS。按公式，实际通过与需要拒绝或降级的量分别约是多少？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q2" data-k="good"><span class="tag">A</span>通过 15,000，拒绝约 45,800</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">B</span>通过 45,800，拒绝 15,000</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">C</span>通过 60,800，不拒绝</button>
+    <button class="opt" data-q="q2" data-k="bad"><span class="tag">D</span>通过 15,000，拒绝 60,800</button>
+  </div>
+  <div class="verdict" id="v-q2"><p><b class="good">A。</b><code>min(60,800, 15,000)=15,000</code>，超额是 45,800。B 把通过量与超额量颠倒；D 又把到达总量当成拒绝量，忽略了已经成功放行的 15,000。</p></div>
+</div>
+
+<div class="quiz" id="q3">
+  <h3>Q3 · 算法波形</h3>
+  <p class="stem">业务允许短暂突发，希望平均速率受控，最符合哪种算法的特性？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q3" data-k="good"><span class="tag">A</span>令牌桶</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">B</span>漏桶恒速流出</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">C</span>不设配额</button>
+    <button class="opt" data-q="q3" data-k="bad"><span class="tag">D</span>只靠客户端超时</button>
+  </div>
+  <div class="verdict" id="v-q3"><p><b class="good">A。</b>令牌可以在空闲期积攒，因此突发开始时能放出高于稳态配额的尖头。B 很诱人，因为它也能保护下游，但漏桶更强调平滑恒速，会把突发改写成排队而不是立即放行。</p></div>
+</div>
+
+<div class="quiz" id="q4">
+  <h3>Q4 · 降级顺序</h3>
+  <p class="stem">系统过载，只能保住一组功能。哪组最符合本章的业务层级？</p>
+  <div class="q-opts">
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">A</span>推荐、榜单、历史订单</button>
+    <button class="opt" data-q="q4" data-k="good"><span class="tag">B</span>下单、支付、退款</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">C</span>推荐、支付、榜单</button>
+    <button class="opt" data-q="q4" data-k="bad"><span class="tag">D</span>按请求到达顺序随机保留</button>
+  </div>
+  <div class="verdict" id="v-q4"><p><b class="good">B。</b>这三项直接关系交易、资金与履约，应获得保底配额。D 看似公平，是最诱人的错误项，但随机顺序会让推荐查询与退款争同一份资源；技术公平不能替代业务优先级。</p></div>
+</div>
+
+<!-- ================= 面试映射 ================= -->
+<div class="interview">
+  <h3>🎯 面试映射 · 本章直接覆盖的高频追问</h3>
+  <div class="iq">
+    <b>「限流算法怎么对比与选型？」</b>
+    <span class="ans">答题骨架：先给已验证配额 → 描述令牌桶尖头 / 漏桶直线 / 滑动窗口台阶 → 匹配突发容忍度 → 给队列、状态与公平性账单。</span>
+  </div>
+  <div class="iq">
+    <b>「降级预案怎么设计？」</b>
+    <span class="ans">答题骨架：按资金与履约分 L0/L1/L2 → 每层写开关、兜底数据和用户文案 → 独立资源隔离 → 定期演练恢复顺序。</span>
+  </div>
+  <div class="iq">
+    <b>「限流阈值怎么定？」</b>
+    <span class="ans">答题骨架：压测容量 → 扣除故障与长尾余量 → 按核心链路最窄处设总预算 → 生产指标校准 → 分级动态调整。反直觉加分点：阈值不是机器峰值，而是可持续服务承诺。</span>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<footer>
+  <div class="foot-in">
+    <span><a href="ch05.html">← 第 5 章 · 缓存三兄弟——穿透、击穿、雪崩</a></span>
+    <span><a href="appendix-cards.html">本章引用病历卡 No.06 / No.09</a></span>
+    <span><a href="ch07.html">第 7 章 · 重试风暴与级联故障——好心办坏事 →</a></span>
+  </div>
+</footer>
+
+<script src="assets/book.js"></script>
+<script src="assets/sim-3.js"></script>
+</body>
+</html>
