@@ -5,7 +5,7 @@
 使用桌面版 Google Chrome 直接打开本地文件：
 
 ```text
-file:///Users/kyx/Documents/sd-handbook-build-pack-v1/index.html
+file://<仓库根目录>/index.html
 ```
 
 全程通过 Computer Use 操作 Chrome，没有使用 Playwright，也没有用 jsdom 或静态推理代替布局测量。Chrome DevTools Console 中 `document.styleSheets` 返回了本地 `assets/style.css`；DevTools Device Toolbar 的 Responsive 模式分别精确设置为 375×900、768×900、1280×900。每次切换宽度后，在被检查页面的真实渲染上下文中读取 `getComputedStyle()` 和 `getBoundingClientRect()`。

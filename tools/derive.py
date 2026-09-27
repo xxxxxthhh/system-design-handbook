@@ -334,6 +334,7 @@ def generate_interview():
 <h2>练完之后回到哪里</h2>
 <p class="lead">这三道 mock 是<a href="ch16.html#four-weeks">第 16 章「接下来 4 周」</a>里 <strong>第 4 周</strong> 的内容——前三周分别是：给自己的系统做一次体检、写三份故障 runbook、做一次预发游戏日。如果你是直接翻到附录 B 的，建议回去把前三周补上：<strong>没有自己系统的上下文，面试答案很容易停在「组件都提到了」那一档</strong>，而那正是上面这把评分尺第一维要卡的地方。</p>
 <p>每做完一题，用评分尺给自己打一次分，把落在「够用」的那几维记下来——它们就是你下一轮要练的东西。</p>
+<p>如果你要面的是 Agent 方向的岗位，同样的「先交卷、再对照、再接追问」练法，本系列另有一本 <a href="https://xxxxxthhh.github.io/agent-interview-handbook/">Agent 设计面试手册</a>：题目换成「设计一个会调用工具的 Agent」，追问换成权限、评估与失败恢复。</p>
 
 </div><!-- /wrap -->
 <footer>

@@ -1,0 +1,44 @@
+# 部署到 GitHub Pages。
+# 只发布书本体（根目录 *.html + assets/）：
+# sample/ 是样章、tools/ 是校验脚本、sources/ 是事实核查留档、tasks/ 是构建任务书，
+# BIBLE.md / CLAUDE.md / SKELETON.md 等是仓库文档，都不属于站点（README「部署时只需 *.html + assets/」）。
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site (book only)
+        run: |
+          mkdir -p _site
+          cp ./*.html _site/
+          cp -R assets _site/
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
